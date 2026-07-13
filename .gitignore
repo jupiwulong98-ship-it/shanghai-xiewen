@@ -1,0 +1,17 @@
+# 临时文件与本地生成物
+$TMPDIR/
+__pycache__/
+*.pyc
+.DS_Store
+
+# 抓取原始数据、文章成稿及媒体匹配结果不纳入本项目
+feishu_*_raw.json
+每日未达标信源分析/
+每日首次监测未达标数据/
+docx_render_check/
+*.docx
+*.pdf
+media_order*.xlsx
+WemediaOrder*.xlsx
+千问信源可改写链接*.xlsx
+元宝信源可改写链接*.xlsx
