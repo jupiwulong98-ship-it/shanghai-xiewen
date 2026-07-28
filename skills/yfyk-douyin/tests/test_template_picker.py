@@ -1,5 +1,6 @@
 import json
 import inspect
+import io
 import sys
 import tempfile
 import threading
@@ -29,6 +30,21 @@ class TemplatePickerTests(unittest.TestCase):
         page = root / name
         Image.new("RGB", (640, 960), "#4d7ea8").save(page)
         return page
+
+    def _preview_fixtures(self, root: Path) -> dict[str, Path]:
+        preview_dir = root / "previews"
+        preview_dir.mkdir()
+        previews = {}
+        for template_id, color in {
+            "classic-gray": "#6b7280",
+            "editorial-warm": "#b45309",
+            "premium-dark": "#111827",
+            "minimal-white": "#f8fafc",
+        }.items():
+            preview = preview_dir / f"{template_id}.png"
+            Image.new("RGB", (1080, 1440), color).save(preview)
+            previews[template_id] = preview
+        return previews
 
     def test_picker_does_not_open_browser_by_default(self):
         default = inspect.signature(run_picker).parameters["open_browser"].default
@@ -129,7 +145,8 @@ class TemplatePickerTests(unittest.TestCase):
             root = Path(temp)
             source = self._source(root)
             result = root / "selection.json"
-            with patch("template_picker.generate_previews", return_value={}):
+            previews = self._preview_fixtures(root)
+            with patch("template_picker.generate_previews", return_value=previews):
                 server = create_picker_server(source, root, result)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -144,6 +161,19 @@ class TemplatePickerTests(unittest.TestCase):
                     "balanced-random",
                 ):
                     self.assertIn(choice, html)
+                for template_id in previews:
+                    with urllib.request.urlopen(base + f"/previews/{template_id}.png", timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.headers.get_content_type(), "image/png")
+                        with Image.open(io.BytesIO(response.read())) as image:
+                            image.verify()
+                            self.assertEqual(image.size, (1080, 1440))
+                with self.assertRaises(urllib.error.HTTPError) as missing_preview:
+                    urllib.request.urlopen(base + "/previews/not-a-template.png", timeout=5)
+                try:
+                    self.assertEqual(missing_preview.exception.code, 404)
+                finally:
+                    missing_preview.exception.close()
                 request = urllib.request.Request(
                     base + "/select",
                     data=json.dumps({"choice": "premium-dark"}).encode(),
