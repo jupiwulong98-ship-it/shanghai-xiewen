@@ -4,16 +4,63 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from docx import Document
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+import build_release as build_release_module  # noqa: E402
+import validate_release as validate_release_module  # noqa: E402
 from build_release import build_release  # noqa: E402
 from validate_release import validate_release  # noqa: E402
 
 
 class ValidateTests(unittest.TestCase):
+    def setUp(self):
+        self._patchers = []
+        self.build_source_renderer = self._patch(
+            build_release_module, "render_docx_pages", side_effect=lambda source, target: self._pages(target, 1)
+        )
+        self.build_card_renderer = self._patch(
+            build_release_module, "render_framed_pages", side_effect=self._cards
+        )
+        self.validate_source_renderer = self._patch(
+            validate_release_module, "render_docx_pages", side_effect=lambda source, target: self._pages(target, 1)
+        )
+
+    def tearDown(self):
+        for patcher in reversed(self._patchers):
+            patcher.stop()
+
+    def _patch(self, module, name, **kwargs):
+        patcher = mock.patch.object(module, name, **kwargs)
+        mocked = patcher.start()
+        self._patchers.append(patcher)
+        return mocked
+
+    @staticmethod
+    def _pages(target: Path, count: int) -> list[Path]:
+        target.mkdir(parents=True)
+        paths = []
+        for index in range(1, count + 1):
+            path = target / f"page-{index:03d}.png"
+            Image.new("RGB", (1200, 1600), (index * 20, 20, 20)).save(path)
+            paths.append(path)
+        return paths
+
+    @staticmethod
+    def _cards(source_pages: list[Path], target: Path, _template: str) -> list[Path]:
+        target.mkdir(parents=True)
+        paths = []
+        for index, source in enumerate(source_pages, 1):
+            path = target / f"{index:03d}.png"
+            with Image.open(source) as image:
+                Image.new("RGB", (1080, 1440), image.getpixel((0, 0))).save(path)
+            paths.append(path)
+        return paths
+
     def test_missing_or_unknown_card_template_reports_diagnostic(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -95,6 +142,62 @@ class ValidateTests(unittest.TestCase):
             output = root / "out"
             build_release(job, output)
             self.assertEqual(validate_release(job, output), [])
+
+    def test_card_count_matches_rerendered_source_pages(self):
+        for actual_count, expected_count in ((1, 2), (3, 2)):
+            with self.subTest(actual_count=actual_count), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                job = self.make_job(root)
+                output = root / "out"
+                self.build_source_renderer.side_effect = lambda source, target, count=actual_count: self._pages(target, count)
+                self.validate_source_renderer.side_effect = lambda source, target, count=expected_count: self._pages(target, count)
+                build_release(job, output)
+
+                errors = validate_release(job, output)
+
+                mismatch = next(error for error in errors if error["code"] == "CARD_COUNT_MISMATCH")
+                self.assertIn(f"expected={expected_count}", mismatch["message"])
+                self.assertIn(f"actual={actual_count}", mismatch["message"])
+
+    def test_invalid_card_size_ignores_non_card_images(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            job = self.make_job(root)
+            output = root / "out"
+            build_release(job, output)
+            release = output / "release.docx"
+            doc = Document(release)
+            non_card = root / "non-card.png"
+            Image.new("RGB", (100, 100), "purple").save(non_card)
+            doc.add_paragraph("编辑区示例图片").add_run().add_picture(str(non_card))
+            doc.save(release)
+            self.assertEqual(validate_release(job, output), [])
+
+            self.build_card_renderer.side_effect = lambda _pages, target, _template: self._small_cards(target)
+            build_release(job, output, overwrite=True)
+            codes = [error["code"] for error in validate_release(job, output)]
+            self.assertIn("INVALID_CARD_SIZE", codes)
+            self.assertIn("WRONG_CARD_SIZE", codes)
+
+    @staticmethod
+    def _small_cards(target: Path) -> list[Path]:
+        target.mkdir(parents=True)
+        card = target / "001.png"
+        Image.new("RGB", (320, 480), "black").save(card)
+        return [card]
+
+    def test_source_page_render_failure_is_a_diagnostic_not_an_exception(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            job = self.make_job(root)
+            output = root / "out"
+            build_release(job, output)
+            self.validate_source_renderer.side_effect = RuntimeError("render unavailable")
+
+            errors = validate_release(job, output)
+
+            failure = next(error for error in errors if error["code"] == "SOURCE_PAGE_RENDER_FAILED")
+            self.assertIn("render unavailable", failure["message"])
 
     def test_article_altered_missing_or_reordered_key_points_mismatch(self):
         changes = (

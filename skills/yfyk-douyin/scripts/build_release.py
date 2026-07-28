@@ -19,8 +19,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
 WORD_FONT = "Arial Unicode MS"
 sys.path.insert(0, str(SCRIPT_DIR))
-from card_templates import TEMPLATES, render_cards, wrap_text  # noqa: E402
-from inspect_sources import inspect_document  # noqa: E402
+from card_templates import TEMPLATES, render_framed_pages  # noqa: E402
+from docx_page_renderer import render_docx_pages  # noqa: E402
 
 def set_run(run, size: float, bold: bool = False, color: str = "222222"):
     run.font.name = WORD_FONT
@@ -229,9 +229,12 @@ def build_release(job_path: Path, output_dir: Path, overwrite: bool = False) -> 
         stage_dir.mkdir()
         for index, entry in enumerate(entries, 1):
             source = Path(entry["source_path"])
-            inspection = inspect_document(source, temp_root / f"inspect-{index:03d}")
-            cards = render_cards(
-                inspection["blocks"],
+            source_pages = render_docx_pages(
+                source,
+                temp_root / f"pages-{index:03d}",
+            )
+            cards = render_framed_pages(
+                source_pages,
                 temp_root / f"cards-{index:03d}",
                 entry["card_template"],
             )

@@ -12,10 +12,96 @@ from docx.oxml.ns import qn
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import build_release as build_release_module  # noqa: E402
-from build_release import build_docx, build_release, render_cards, validate_job, wrap_text  # noqa: E402
+from build_release import build_docx, build_release, validate_job  # noqa: E402
+from card_templates import render_cards, wrap_text  # noqa: E402
 
 
 class BuildTests(unittest.TestCase):
+    def setUp(self):
+        self.render_source_pages = self._patcher(
+            build_release_module,
+            "render_docx_pages",
+            side_effect=self._render_source_pages,
+        )
+        self.render_framed_pages = self._patcher(
+            build_release_module,
+            "render_framed_pages",
+            side_effect=self._render_framed_pages,
+        )
+
+    def tearDown(self):
+        for patcher in reversed(getattr(self, "_patchers", [])):
+            patcher.stop()
+
+    def _patcher(self, module, name, **kwargs):
+        patcher = mock.patch.object(module, name, **kwargs)
+        patcher.start()
+        self._patchers = getattr(self, "_patchers", []) + [patcher]
+        return getattr(module, name)
+
+    @staticmethod
+    def _render_source_pages(_source: Path, target: Path) -> list[Path]:
+        target.mkdir(parents=True)
+        pages = []
+        for index, color in enumerate(("red", "green", "blue"), 1):
+            page = target / f"page-{index:03d}.png"
+            Image.new("RGB", (1200, 1600), color).save(page)
+            pages.append(page)
+        return pages
+
+    @staticmethod
+    def _render_framed_pages(source_pages: list[Path], target: Path, _template: str) -> list[Path]:
+        target.mkdir(parents=True)
+        cards = []
+        for index, source_page in enumerate(source_pages, 1):
+            card = target / f"{index:03d}.png"
+            with Image.open(source_page) as image:
+                Image.new("RGB", (1080, 1440), image.getpixel((0, 0))).save(card)
+            cards.append(card)
+        return cards
+
+    def test_build_frames_each_rendered_source_page_in_order_without_block_reflow(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._make_source(root / "source.docx")
+            job = self._write_job(root, [self._ranking_entry(source, "release.docx")])
+            with mock.patch.object(build_release_module, "inspect_document", create=True) as inspect, \
+                 mock.patch.object(build_release_module, "render_cards", create=True) as reflow:
+                outputs = build_release(job, root / "out")
+
+            self.assertEqual(outputs, [root / "out" / "release.docx"])
+            self.assertEqual(self.render_source_pages.call_count, 1)
+            source_call = self.render_source_pages.call_args.args
+            self.assertEqual(source_call[0], source)
+            self.assertEqual(source_call[1].name, "pages-001")
+            frame_call = self.render_framed_pages.call_args.args
+            self.assertEqual(
+                frame_call[0],
+                [source_call[1] / f"page-{index:03d}.png" for index in range(1, 4)],
+            )
+            self.assertEqual(frame_call[1].name, "cards-001")
+            self.assertEqual(frame_call[2], "classic-gray")
+            self.assertEqual(len(Document(outputs[0]).inline_shapes), 3)
+            inspect.assert_not_called()
+            reflow.assert_not_called()
+
+    def test_source_page_render_failure_leaves_the_entire_batch_unpublished(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._make_source(root / "source.docx")
+            job = self._write_job(root, [
+                self._ranking_entry(source, "one.docx"),
+                self._ranking_entry(source, "two.docx"),
+            ])
+            self.render_source_pages.side_effect = [
+                self._render_source_pages(source, root / "prepared-pages"),
+                RuntimeError("source rendering failed"),
+            ]
+
+            with self.assertRaisesRegex(RuntimeError, "source rendering failed"):
+                build_release(job, root / "out")
+
+            self.assertFalse((root / "out").exists())
     def test_card_template_is_required_and_must_be_registered(self):
         entry = {
             "source_path": "/tmp/source.docx",
@@ -150,7 +236,7 @@ class BuildTests(unittest.TestCase):
                 ["List Number", "List Number"],
             )
             self.assertNotIn("榜单", texts)
-            self.assertEqual(len(result.inline_shapes), 1)
+            self.assertEqual(len(result.inline_shapes), 3)
 
     def test_article_release_has_bulleted_key_points_and_embedded_cards(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -188,7 +274,7 @@ class BuildTests(unittest.TestCase):
             for point in points:
                 paragraph = next(p for p in result.paragraphs if p.text == point)
                 self.assertEqual(paragraph.style.name, "List Bullet")
-            self.assertEqual(len(result.inline_shapes), 1)
+            self.assertEqual(len(result.inline_shapes), 3)
 
     def test_three_cards_use_one_section_and_explicit_page_breaks(self):
         with tempfile.TemporaryDirectory() as temp:

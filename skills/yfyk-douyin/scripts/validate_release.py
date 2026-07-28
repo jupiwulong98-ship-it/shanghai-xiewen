@@ -5,13 +5,23 @@ import argparse
 import io
 import json
 import re
+import tempfile
 import zipfile
+from xml.etree import ElementTree
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 from docx import Document
 from card_templates import TEMPLATES
+from docx_page_renderer import render_docx_pages
+
+
+WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+NS = {"w": WORD_NS, "a": DRAWING_NS, "r": REL_NS, "pr": PACKAGE_REL_NS}
 
 
 def diagnostic(source: str, output: str, code: str, message: str) -> dict[str, str]:
@@ -34,6 +44,54 @@ def media_audit(path: Path) -> tuple[list[tuple[int, int]], list[str], int]:
             except Exception:
                 corrupt.append(name)
     return sizes, corrupt, media_count
+
+
+def published_card_media(path: Path) -> list[str]:
+    """Return media parts used by the builder's page-break, image, caption card structure."""
+    with zipfile.ZipFile(path) as archive:
+        document = ElementTree.fromstring(archive.read("word/document.xml"))
+        relationships = ElementTree.fromstring(archive.read("word/_rels/document.xml.rels"))
+    relation_targets = {
+        relation.get("Id"): relation.get("Target")
+        for relation in relationships.findall("pr:Relationship", NS)
+        if relation.get("TargetMode") != "External" and relation.get("Target", "").startswith("media/")
+    }
+    body = document.find("w:body", NS)
+    if body is None:
+        return []
+    paragraphs = [child for child in body if child.tag == f"{{{WORD_NS}}}p"]
+    cards: list[str] = []
+    for index, paragraph in enumerate(paragraphs):
+        if index == 0 or index + 1 >= len(paragraphs):
+            continue
+        previous = paragraphs[index - 1]
+        following = paragraphs[index + 1]
+        has_page_break = any(
+            node.get(f"{{{WORD_NS}}}type") == "page"
+            for node in previous.findall(".//w:br", NS)
+        )
+        caption = "".join(node.text or "" for node in following.findall(".//w:t", NS)).strip()
+        if not has_page_break or re.fullmatch(r"图 \d+/\d+", caption) is None:
+            continue
+        for blip in paragraph.findall(".//a:blip", NS):
+            target = relation_targets.get(blip.get(f"{{{REL_NS}}}embed"))
+            if target:
+                cards.append(f"word/{target}")
+    return cards
+
+
+def card_media_audit(path: Path, media_names: list[str]) -> tuple[list[tuple[int, int]], list[str]]:
+    sizes: list[tuple[int, int]] = []
+    corrupt: list[str] = []
+    with zipfile.ZipFile(path) as archive:
+        for name in media_names:
+            try:
+                with Image.open(io.BytesIO(archive.read(name))) as image:
+                    image.verify()
+                    sizes.append(image.size)
+            except Exception:
+                corrupt.append(name)
+    return sizes, corrupt
 
 
 def valid_output_filename(filename: Any) -> bool:
@@ -244,7 +302,9 @@ def validate_release(job_path: Path, output_dir: Path) -> list[dict[str, str]]:
             ))
 
         sizes, corrupt_media, media_count = media_audit(output)
-        if media_count == 0:
+        card_media = published_card_media(output)
+        card_sizes, corrupt_cards = card_media_audit(output, card_media)
+        if not card_media:
             errors.append(diagnostic(source, str(output), "NO_CARDS", "DOCX 未嵌入图片"))
         for name in corrupt_media:
             errors.append(diagnostic(
@@ -253,9 +313,37 @@ def validate_release(job_path: Path, output_dir: Path) -> list[dict[str, str]]:
                 "CORRUPT_MEDIA",
                 f"无法读取嵌入媒体：{name}",
             ))
-        for size in sizes:
+        for name in corrupt_cards:
+            if name not in corrupt_media:
+                errors.append(diagnostic(
+                    source,
+                    str(output),
+                    "CORRUPT_MEDIA",
+                    f"无法读取嵌入媒体：{name}",
+                ))
+        for size in card_sizes:
             if size != (1080, 1440):
                 errors.append(diagnostic(source, str(output), "WRONG_CARD_SIZE", str(size)))
+                errors.append(diagnostic(source, str(output), "INVALID_CARD_SIZE", str(size)))
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="validate_source_pages_") as temp:
+                expected_cards = render_docx_pages(Path(source), Path(temp) / "pages")
+        except Exception as exc:
+            errors.append(diagnostic(
+                source,
+                str(output),
+                "SOURCE_PAGE_RENDER_FAILED",
+                str(exc),
+            ))
+        else:
+            if len(card_media) != len(expected_cards):
+                errors.append(diagnostic(
+                    source,
+                    str(output),
+                    "CARD_COUNT_MISMATCH",
+                    f"expected={len(expected_cards)}; actual={len(card_media)}",
+                ))
     return errors
 
 
