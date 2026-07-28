@@ -97,7 +97,7 @@ def create_picker_server(session_dir: Path, result_path: Path) -> ThreadingHTTPS
     return ThreadingHTTPServer(("127.0.0.1", 0), PickerHandler)
 
 
-def run_picker(work_dir: Path, result_path: Path, timeout_seconds: int, open_browser: bool = True) -> dict[str, Any]:
+def run_picker(work_dir: Path, result_path: Path, timeout_seconds: int, open_browser: bool = False) -> dict[str, Any]:
     server = create_picker_server(work_dir, result_path)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -123,10 +123,14 @@ def main() -> int:
     parser.add_argument("--work-dir", required=True, type=Path)
     parser.add_argument("--result", required=True, type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
-    parser.add_argument("--no-open", action="store_true")
+    parser.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="Open the legacy webpage picker. Use only after explicit user consent.",
+    )
     args = parser.parse_args()
     try:
-        selection = run_picker(args.work_dir, args.result, args.timeout_seconds, not args.no_open)
+        selection = run_picker(args.work_dir, args.result, args.timeout_seconds, args.open_browser)
     except TimeoutError as exc:
         print(json.dumps({"status": "timeout", "error": str(exc)}, ensure_ascii=False))
         return 2

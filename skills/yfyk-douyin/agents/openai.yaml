@@ -1,7 +1,7 @@
 interface:
   display_name: "YFYK Douyin"
-  short_description: "用可视模板或均衡随机将 DOCX 转为完整抖音图文"
-  default_prompt: "Use $yfyk-douyin to show clickable production template previews, materialize a fixed or balanced-random card style, and convert these DOCX files into editable Douyin posts with complete embedded source cards."
+  short_description: "在聊天内选模板，将 DOCX 转为完整抖音图文"
+  default_prompt: "Use $yfyk-douyin to show chat-native clickable production template previews, materialize a fixed or balanced-random card style, and convert these DOCX files into editable Douyin posts with complete embedded source cards."
 
 policy:
   allow_implicit_invocation: true

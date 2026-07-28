@@ -1,4 +1,5 @@
 import json
+import inspect
 import sys
 import tempfile
 import threading
@@ -12,10 +13,23 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from template_picker import create_picker_server, generate_previews  # noqa: E402
+from template_picker import create_picker_server, generate_previews, run_picker  # noqa: E402
 
 
 class TemplatePickerTests(unittest.TestCase):
+    def test_picker_does_not_open_browser_by_default(self):
+        default = inspect.signature(run_picker).parameters["open_browser"].default
+        self.assertIs(default, False)
+
+    def test_skill_requires_chat_native_selection_before_web_fallback(self):
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("ask_followup_questions", skill)
+        self.assertIn("variant: visual", skill)
+        self.assertIn(
+            "Never open the webpage picker without explicit user consent",
+            skill,
+        )
+
     def test_new_picker_session_clears_stale_selection(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
