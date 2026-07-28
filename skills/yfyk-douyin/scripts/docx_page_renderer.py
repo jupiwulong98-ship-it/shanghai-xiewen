@@ -7,7 +7,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import ctypes
+import errno
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +67,60 @@ def _set_png_permissions(path: Path) -> None:
         path.chmod(0o644)
     except OSError as exc:
         raise PageRenderError(f"failed to set rendered page permissions: {path.name}") from exc
+
+
+def _set_directory_permissions(path: Path) -> None:
+    """Make a published page directory readable and traversable."""
+    try:
+        path.chmod(0o755)
+    except OSError as exc:
+        raise PageRenderError(f"failed to set rendered page directory permissions: {path}") from exc
+
+
+def _rename_error(source_dir: Path, target_dir: Path, error_number: int) -> PageRenderError:
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        return PageRenderError(f"target directory already exists: {target_dir}")
+    description = os.strerror(error_number) if error_number else "unknown rename error"
+    return PageRenderError(f"failed to publish rendered pages from {source_dir} to {target_dir}: {description}")
+
+
+def _rename_no_replace(source_dir: Path, target_dir: Path) -> None:
+    """Atomically publish a directory, failing rather than replacing any target entry."""
+    source = os.fsencode(source_dir)
+    target = os.fsencode(target_dir)
+    try:
+        if sys.platform == "darwin":
+            libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+            renamex_np = libc.renamex_np
+            renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            renamex_np.restype = ctypes.c_int
+            result = renamex_np(source, target, 0x00000004)  # RENAME_EXCL
+        elif sys.platform.startswith("linux"):
+            syscall_number = getattr(os, "SYS_renameat2", None)
+            if syscall_number is None:
+                machine = os.uname().machine
+                syscall_number = {"x86_64": 316, "aarch64": 276}.get(machine)
+            if syscall_number is None:
+                raise PageRenderError(
+                    "atomic no-replace directory publication is unavailable on this Linux architecture"
+                )
+            libc = ctypes.CDLL(None, use_errno=True)
+            syscall = libc.syscall
+            syscall.restype = ctypes.c_long
+            result = syscall(syscall_number, -100, source, -100, target, 1)  # RENAME_NOREPLACE
+        else:
+            if os.path.lexists(target_dir):
+                raise PageRenderError(f"target directory already exists: {target_dir}")
+            raise PageRenderError(
+                f"atomic no-replace directory publication is unavailable on platform {sys.platform}; refusing to publish"
+            )
+    except PageRenderError:
+        raise
+    except (AttributeError, OSError) as exc:
+        raise PageRenderError(f"atomic no-replace directory publication is unavailable: {exc}") from exc
+
+    if result != 0:
+        raise _rename_error(source_dir, target_dir, ctypes.get_errno())
 
 
 def _assert_continuous_pages(paths: list[Path], staging_dir: Path) -> None:
@@ -162,7 +219,7 @@ def render_docx_pages(source: Path, target_dir: Path, dpi: int = 160) -> list[Pa
     try:
         target_parent = target_dir.parent
         target_parent.mkdir(parents=True, exist_ok=True)
-        if target_dir.exists():
+        if os.path.lexists(target_dir):
             raise PageRenderError(f"target directory already exists: {target_dir}")
     except PageRenderError:
         raise
@@ -230,9 +287,8 @@ def render_docx_pages(source: Path, target_dir: Path, dpi: int = 160) -> list[Pa
 
             _assert_continuous_pages(staged_pages, staging_dir)
             expected_names = [path.name for path in staged_pages]
-            if target_dir.exists():
-                raise PageRenderError(f"target directory already exists: {target_dir}")
-            staging_dir.rename(target_dir)
+            _set_directory_permissions(staging_dir)
+            _rename_no_replace(staging_dir, target_dir)
             output_pages = [target_dir / name for name in expected_names]
             if not all(path.is_file() for path in output_pages):
                 raise PageRenderError("rendered page sequence is incomplete")

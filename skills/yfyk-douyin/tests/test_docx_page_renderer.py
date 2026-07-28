@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import importlib.util
+import os
 import shutil
 import stat
 
@@ -16,6 +17,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from docx_page_renderer import (  # noqa: E402
     PageRenderError,
     _find_soffice,
+    _rename_no_replace,
     render_docx_pages,
 )
 
@@ -75,6 +77,14 @@ class _FakeFitz:
 
 
 class DocxPageRendererTests(unittest.TestCase):
+    def assert_readable_permissions(self, page: Path, target_dir: Path) -> None:
+        if os.name == "posix":
+            self.assertEqual(stat.S_IMODE(page.stat().st_mode), 0o644)
+            self.assertEqual(stat.S_IMODE(target_dir.stat().st_mode), 0o755)
+        else:
+            self.assertTrue(os.access(page, os.R_OK))
+            self.assertTrue(os.access(target_dir, os.R_OK | os.X_OK))
+
     def _source(self, root: Path) -> Path:
         source = root / "source.docx"
         source.write_bytes(b"not-a-real-docx")
@@ -102,7 +112,7 @@ class DocxPageRendererTests(unittest.TestCase):
             for page in pages:
                 with Image.open(page) as image:
                     image.verify()
-                self.assertEqual(stat.S_IMODE(page.stat().st_mode), 0o644)
+                self.assert_readable_permissions(page, target)
 
     def test_missing_source_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -140,6 +150,15 @@ class DocxPageRendererTests(unittest.TestCase):
             with self.assertRaisesRegex(PageRenderError, "target directory already exists"):
                 render_docx_pages(self._source(root), target)
 
+    @unittest.skipUnless(hasattr(os, "symlink"), "symbolic links are required")
+    def test_dangling_target_symlink_is_rejected_before_rendering(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "pages"
+            target.symlink_to(root / "missing-target")
+            with self.assertRaisesRegex(PageRenderError, "target directory already exists"):
+                render_docx_pages(self._source(root), target)
+
     def test_jpeg_disguised_as_png_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -163,6 +182,27 @@ class DocxPageRendererTests(unittest.TestCase):
                 with self.assertRaisesRegex(PageRenderError, "failed to rasterize"):
                     render_docx_pages(self._source(root), target)
             self.assertFalse(target.exists())
+
+    def test_external_target_created_at_publish_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "pages"
+            real_rename = _rename_no_replace
+
+            def external_publish_then_rename(source_dir: Path, target_dir: Path):
+                target_dir.mkdir()
+                (target_dir / "external.txt").write_text("keep me")
+                return real_rename(source_dir, target_dir)
+
+            with (
+                patch("docx_page_renderer._load_fitz", return_value=_FakeFitz(["red"])),
+                patch("docx_page_renderer.subprocess.run", side_effect=self._successful_conversion),
+                patch("docx_page_renderer._find_soffice", return_value="/fake/soffice"),
+                patch("docx_page_renderer._rename_no_replace", side_effect=external_publish_then_rename),
+            ):
+                with self.assertRaisesRegex(PageRenderError, "target directory already exists"):
+                    render_docx_pages(self._source(root), target)
+            self.assertEqual((target / "external.txt").read_text(), "keep me")
 
     def _pdftoppm_run(self, mode: str):
         def fake_run(args, **kwargs):
@@ -199,7 +239,8 @@ class DocxPageRendererTests(unittest.TestCase):
             ):
                 pages = render_docx_pages(self._source(root), target)
             self.assertEqual([page.name for page in pages], ["page-001.png", "page-002.png"])
-            self.assertEqual([stat.S_IMODE(page.stat().st_mode) for page in pages], [0o644, 0o644])
+            for page in pages:
+                self.assert_readable_permissions(page, target)
 
     def test_pdftoppm_errors_are_rejected_deterministically(self):
         expected_messages = {
