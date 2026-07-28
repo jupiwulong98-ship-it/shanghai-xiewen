@@ -58,28 +58,23 @@ def _conversion_error(result: subprocess.CompletedProcess[str]) -> PageRenderErr
     return PageRenderError(f"DOCX conversion failed (exit {result.returncode}): {detail}")
 
 
-def _publish(staged: Path, destination: Path) -> None:
-    """Publish a completed PNG without exposing a partially copied destination."""
-    handle = tempfile.NamedTemporaryFile(
-        dir=destination.parent,
-        prefix=f".{destination.stem}-",
-        suffix=".png",
-        delete=False,
-    )
-    temporary_destination = Path(handle.name)
-    handle.close()
+def _set_png_permissions(path: Path) -> None:
+    """Set predictable, readable permissions before an image is published."""
     try:
-        shutil.copyfile(staged, temporary_destination)
-        _validate_png(temporary_destination)
-        temporary_destination.replace(destination)
-    except Exception:
-        temporary_destination.unlink(missing_ok=True)
-        raise
+        path.chmod(0o644)
+    except OSError as exc:
+        raise PageRenderError(f"failed to set rendered page permissions: {path.name}") from exc
 
 
-def _assert_continuous_pages(paths: list[Path]) -> None:
+def _assert_continuous_pages(paths: list[Path], staging_dir: Path) -> None:
     expected_names = [f"page-{index:03d}.png" for index in range(1, len(paths) + 1)]
     if [path.name for path in paths] != expected_names:
+        raise PageRenderError("rendered page sequence is abnormal")
+    try:
+        actual_names = sorted(path.name for path in staging_dir.iterdir())
+    except OSError as exc:
+        raise PageRenderError(f"failed to inspect rendered page sequence: {exc}") from exc
+    if actual_names != expected_names:
         raise PageRenderError("rendered page sequence is abnormal")
 
 
@@ -98,6 +93,7 @@ def _rasterize_with_fitz(fitz: Any, pdf_path: Path, staging_dir: Path, dpi: int)
             rendered = staging_dir / f"page-{index + 1:03d}.png"
             pixmap.save(str(rendered))
             _validate_png(rendered)
+            _set_png_permissions(rendered)
             staged_pages.append(rendered)
         return staged_pages
     except PageRenderError:
@@ -143,6 +139,7 @@ def _rasterize_with_pdftoppm(pdftoppm: str, pdf_path: Path, staging_dir: Path, d
         if source_page != rendered:
             source_page.replace(rendered)
         _validate_png(rendered)
+        _set_png_permissions(rendered)
         staged_pages.append(rendered)
     return staged_pages
 
@@ -162,77 +159,81 @@ def render_docx_pages(source: Path, target_dir: Path, dpi: int = 160) -> list[Pa
         raise PageRenderError(f"source must be a .docx file: {source}")
     if not isinstance(dpi, int) or isinstance(dpi, bool) or dpi <= 0:
         raise PageRenderError(f"dpi must be a positive integer, got {dpi!r}")
-    if target_dir.exists() and not target_dir.is_dir():
-        raise PageRenderError(f"target directory is not a directory: {target_dir}")
-    target_dir.mkdir(parents=True, exist_ok=True)
-    existing_pages = list(target_dir.glob("page-*.png"))
-    if existing_pages:
-        raise PageRenderError("target page sequence is abnormal: page PNGs already exist")
+    try:
+        target_parent = target_dir.parent
+        target_parent.mkdir(parents=True, exist_ok=True)
+        if target_dir.exists():
+            raise PageRenderError(f"target directory already exists: {target_dir}")
+    except PageRenderError:
+        raise
+    except OSError as exc:
+        raise PageRenderError(f"failed to prepare target directory: {exc}") from exc
 
     soffice = _find_soffice()
     try:
-        with tempfile.TemporaryDirectory(prefix="docx-page-render-") as temporary:
-            temporary_root = Path(temporary)
-            home_dir = temporary_root / "home"
-            profile_dir = temporary_root / "libreoffice-profile"
-            conversion_dir = temporary_root / "pdf"
-            staging_dir = temporary_root / "pages"
-            for directory in (home_dir, profile_dir, conversion_dir, staging_dir):
-                directory.mkdir()
+        with tempfile.TemporaryDirectory(prefix=f".{target_dir.name}-", dir=target_parent) as output_temporary:
+            staging_dir = Path(output_temporary)
+            with tempfile.TemporaryDirectory(prefix="docx-page-render-") as temporary:
+                temporary_root = Path(temporary)
+                home_dir = temporary_root / "home"
+                profile_dir = temporary_root / "libreoffice-profile"
+                conversion_dir = temporary_root / "pdf"
+                for directory in (home_dir, profile_dir, conversion_dir):
+                    directory.mkdir()
 
-            environment = os.environ.copy()
-            environment["HOME"] = str(home_dir)
-            environment["TMPDIR"] = str(temporary_root)
-            command = [
-                soffice,
-                "--headless",
-                f"-env:UserInstallation={profile_dir.as_uri()}",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                str(conversion_dir),
-                str(source),
-            ]
-            try:
-                result = subprocess.run(
-                    command,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                    env=environment,
-                )
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                raise PageRenderError(f"DOCX conversion failed to start: {exc}") from exc
-            if result.returncode != 0:
-                raise _conversion_error(result)
+                environment = os.environ.copy()
+                environment["HOME"] = str(home_dir)
+                environment["TMPDIR"] = str(temporary_root)
+                command = [
+                    soffice,
+                    "--headless",
+                    f"-env:UserInstallation={profile_dir.as_uri()}",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(conversion_dir),
+                    str(source),
+                ]
+                try:
+                    result = subprocess.run(
+                        command,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                        env=environment,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise PageRenderError(f"DOCX conversion failed to start: {exc}") from exc
+                if result.returncode != 0:
+                    raise _conversion_error(result)
 
-            pdf_path = conversion_dir / f"{source.stem}.pdf"
-            if not pdf_path.is_file() or pdf_path.stat().st_size == 0:
-                raise PageRenderError("DOCX conversion failed: LibreOffice did not produce a PDF")
+                pdf_path = conversion_dir / f"{source.stem}.pdf"
+                if not pdf_path.is_file() or pdf_path.stat().st_size == 0:
+                    raise PageRenderError("DOCX conversion failed: LibreOffice did not produce a PDF")
 
-            fitz_error = None
-            try:
-                fitz = _load_fitz()
-            except PageRenderError as exc:
-                fitz_error = exc
-                fitz = None
-            if fitz is not None:
-                staged_pages = _rasterize_with_fitz(fitz, pdf_path, staging_dir, dpi)
-            else:
-                pdftoppm = _find_pdftoppm()
-                if pdftoppm is None:
-                    raise PageRenderError(
-                        "PyMuPDF (fitz) or the pdftoppm command is required to rasterize DOCX pages"
-                    ) from fitz_error
-                staged_pages = _rasterize_with_pdftoppm(pdftoppm, pdf_path, staging_dir, dpi)
+                fitz_error = None
+                try:
+                    fitz = _load_fitz()
+                except PageRenderError as exc:
+                    fitz_error = exc
+                    fitz = None
+                if fitz is not None:
+                    staged_pages = _rasterize_with_fitz(fitz, pdf_path, staging_dir, dpi)
+                else:
+                    pdftoppm = _find_pdftoppm()
+                    if pdftoppm is None:
+                        raise PageRenderError(
+                            "PyMuPDF (fitz) or the pdftoppm command is required to rasterize DOCX pages"
+                        ) from fitz_error
+                    staged_pages = _rasterize_with_pdftoppm(pdftoppm, pdf_path, staging_dir, dpi)
 
-            _assert_continuous_pages(staged_pages)
+            _assert_continuous_pages(staged_pages, staging_dir)
             expected_names = [path.name for path in staged_pages]
-
+            if target_dir.exists():
+                raise PageRenderError(f"target directory already exists: {target_dir}")
+            staging_dir.rename(target_dir)
             output_pages = [target_dir / name for name in expected_names]
-            for staged, destination in zip(staged_pages, output_pages, strict=True):
-                _publish(staged, destination)
             if not all(path.is_file() for path in output_pages):
                 raise PageRenderError("rendered page sequence is incomplete")
             return output_pages
