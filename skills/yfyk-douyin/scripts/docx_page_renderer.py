@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -37,10 +38,17 @@ def _load_fitz() -> Any:
     return fitz
 
 
+def _find_pdftoppm() -> str | None:
+    """Return Poppler's PDF rasterizer when it is installed."""
+    return shutil.which("pdftoppm")
+
+
 def _validate_png(path: Path) -> None:
     try:
         with Image.open(path) as image:
             image.verify()
+            if image.format != "PNG":
+                raise PageRenderError(f"rendered page is not a decodable PNG: {path.name}")
     except (OSError, UnidentifiedImageError, ValueError) as exc:
         raise PageRenderError(f"rendered page is not a decodable PNG: {path.name}") from exc
 
@@ -69,6 +77,76 @@ def _publish(staged: Path, destination: Path) -> None:
         raise
 
 
+def _assert_continuous_pages(paths: list[Path]) -> None:
+    expected_names = [f"page-{index:03d}.png" for index in range(1, len(paths) + 1)]
+    if [path.name for path in paths] != expected_names:
+        raise PageRenderError("rendered page sequence is abnormal")
+
+
+def _rasterize_with_fitz(fitz: Any, pdf_path: Path, staging_dir: Path, dpi: int) -> list[Path]:
+    document = None
+    try:
+        document = fitz.open(str(pdf_path))
+        page_count = document.page_count
+        if page_count <= 0:
+            raise PageRenderError("converted PDF has no pages")
+        matrix = fitz.Matrix(dpi / 72, dpi / 72)
+        staged_pages: list[Path] = []
+        for index in range(page_count):
+            page = document.load_page(index)
+            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+            rendered = staging_dir / f"page-{index + 1:03d}.png"
+            pixmap.save(str(rendered))
+            _validate_png(rendered)
+            staged_pages.append(rendered)
+        return staged_pages
+    except PageRenderError:
+        raise
+    except Exception as exc:
+        raise PageRenderError(f"failed to rasterize converted PDF: {exc}") from exc
+    finally:
+        if document is not None:
+            document.close()
+
+
+def _rasterize_with_pdftoppm(pdftoppm: str, pdf_path: Path, staging_dir: Path, dpi: int) -> list[Path]:
+    prefix = staging_dir / "page"
+    try:
+        result = subprocess.run(
+            [pdftoppm, "-png", "-r", str(dpi), str(pdf_path), str(prefix)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PageRenderError(f"PDF rasterization failed to start: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "no rasterizer output").strip()
+        raise PageRenderError(f"PDF rasterization failed (exit {result.returncode}): {detail}")
+
+    numbered_pages: list[tuple[int, Path]] = []
+    for path in staging_dir.glob("page-*.png"):
+        match = re.fullmatch(r"page-(\d+)\.png", path.name)
+        if match is None:
+            raise PageRenderError("rendered page sequence is abnormal")
+        numbered_pages.append((int(match.group(1)), path))
+    numbered_pages.sort()
+    if not numbered_pages:
+        raise PageRenderError("converted PDF has no pages")
+    if [number for number, _ in numbered_pages] != list(range(1, len(numbered_pages) + 1)):
+        raise PageRenderError("rendered page sequence is abnormal")
+
+    staged_pages: list[Path] = []
+    for index, (_, source_page) in enumerate(numbered_pages, start=1):
+        rendered = staging_dir / f"page-{index:03d}.png"
+        if source_page != rendered:
+            source_page.replace(rendered)
+        _validate_png(rendered)
+        staged_pages.append(rendered)
+    return staged_pages
+
+
 def render_docx_pages(source: Path, target_dir: Path, dpi: int = 160) -> list[Path]:
     """Convert *source* DOCX to PDF, then rasterize every PDF page as ``page-###.png``.
 
@@ -87,6 +165,9 @@ def render_docx_pages(source: Path, target_dir: Path, dpi: int = 160) -> list[Pa
     if target_dir.exists() and not target_dir.is_dir():
         raise PageRenderError(f"target directory is not a directory: {target_dir}")
     target_dir.mkdir(parents=True, exist_ok=True)
+    existing_pages = list(target_dir.glob("page-*.png"))
+    if existing_pages:
+        raise PageRenderError("target page sequence is abnormal: page PNGs already exist")
 
     soffice = _find_soffice()
     try:
@@ -130,33 +211,24 @@ def render_docx_pages(source: Path, target_dir: Path, dpi: int = 160) -> list[Pa
             if not pdf_path.is_file() or pdf_path.stat().st_size == 0:
                 raise PageRenderError("DOCX conversion failed: LibreOffice did not produce a PDF")
 
-            document = None
+            fitz_error = None
             try:
                 fitz = _load_fitz()
-                document = fitz.open(str(pdf_path))
-                page_count = document.page_count
-                if page_count <= 0:
-                    raise PageRenderError("converted PDF has no pages")
-                matrix = fitz.Matrix(dpi / 72, dpi / 72)
-                staged_pages: list[Path] = []
-                for index in range(page_count):
-                    page = document.load_page(index)
-                    pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-                    rendered = staging_dir / f"page-{index + 1:03d}.png"
-                    pixmap.save(str(rendered))
-                    _validate_png(rendered)
-                    staged_pages.append(rendered)
-            except PageRenderError:
-                raise
-            except Exception as exc:
-                raise PageRenderError(f"failed to rasterize converted PDF: {exc}") from exc
-            finally:
-                if document is not None:
-                    document.close()
+            except PageRenderError as exc:
+                fitz_error = exc
+                fitz = None
+            if fitz is not None:
+                staged_pages = _rasterize_with_fitz(fitz, pdf_path, staging_dir, dpi)
+            else:
+                pdftoppm = _find_pdftoppm()
+                if pdftoppm is None:
+                    raise PageRenderError(
+                        "PyMuPDF (fitz) or the pdftoppm command is required to rasterize DOCX pages"
+                    ) from fitz_error
+                staged_pages = _rasterize_with_pdftoppm(pdftoppm, pdf_path, staging_dir, dpi)
 
-            expected_names = [f"page-{index:03d}.png" for index in range(1, page_count + 1)]
-            if [path.name for path in staged_pages] != expected_names:
-                raise PageRenderError("rendered page sequence is abnormal")
+            _assert_continuous_pages(staged_pages)
+            expected_names = [path.name for path in staged_pages]
 
             output_pages = [target_dir / name for name in expected_names]
             for staged, destination in zip(staged_pages, output_pages, strict=True):

@@ -4,36 +4,44 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+import importlib.util
+import shutil
 
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from docx_page_renderer import PageRenderError, render_docx_pages  # noqa: E402
+from docx_page_renderer import (  # noqa: E402
+    PageRenderError,
+    _find_soffice,
+    render_docx_pages,
+)
 
 
 class _FakePixmap:
-    def __init__(self, color: str):
+    def __init__(self, color: str, image_format: str = "PNG"):
         self.color = color
+        self.image_format = image_format
 
     def save(self, path: str):
-        Image.new("RGB", (32, 48), self.color).save(path, format="PNG")
+        Image.new("RGB", (32, 48), self.color).save(path, format=self.image_format)
 
 
 class _FakePage:
-    def __init__(self, color: str):
+    def __init__(self, color: str, image_format: str = "PNG"):
         self.color = color
+        self.image_format = image_format
 
     def get_pixmap(self, *, matrix, alpha):
         self.matrix = matrix
         self.alpha = alpha
-        return _FakePixmap(self.color)
+        return _FakePixmap(self.color, self.image_format)
 
 
 class _FakeDocument:
-    def __init__(self, colors: list[str]):
-        self.pages = [_FakePage(color) for color in colors]
+    def __init__(self, colors: list[str], image_format: str = "PNG"):
+        self.pages = [_FakePage(color, image_format) for color in colors]
         self.page_count = len(self.pages)
 
     def load_page(self, index: int):
@@ -49,11 +57,12 @@ class _FakeFitz:
             self.x = x
             self.y = y
 
-    def __init__(self, colors: list[str]):
+    def __init__(self, colors: list[str], image_format: str = "PNG"):
         self.colors = colors
+        self.image_format = image_format
 
     def open(self, path):
-        return _FakeDocument(self.colors)
+        return _FakeDocument(self.colors, self.image_format)
 
 
 class DocxPageRendererTests(unittest.TestCase):
@@ -113,10 +122,38 @@ class DocxPageRendererTests(unittest.TestCase):
                 with self.assertRaisesRegex(PageRenderError, "no pages"):
                     render_docx_pages(source, root / "zero-pages")
 
+    def test_existing_page_outputs_are_rejected_as_an_abnormal_sequence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "pages"
+            target.mkdir()
+            Image.new("RGB", (1, 1), "white").save(target / "page-999.png")
+            with self.assertRaisesRegex(PageRenderError, "page sequence is abnormal"):
+                render_docx_pages(self._source(root), target)
+
+    def test_jpeg_disguised_as_png_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with (
+                patch("docx_page_renderer._load_fitz", return_value=_FakeFitz(["red"], "JPEG")),
+                patch("docx_page_renderer.subprocess.run", side_effect=self._successful_conversion),
+                patch("docx_page_renderer._find_soffice", return_value="/fake/soffice"),
+            ):
+                with self.assertRaisesRegex(PageRenderError, "not a decodable PNG"):
+                    render_docx_pages(self._source(root), root / "pages")
+
+
+def _smoke_dependencies_available() -> bool:
+    try:
+        _find_soffice()
+    except PageRenderError:
+        return False
+    return bool(importlib.util.find_spec("fitz") or shutil.which("pdftoppm"))
+
 
 @unittest.skipUnless(
-    __import__("importlib").util.find_spec("fitz") and __import__("shutil").which("soffice"),
-    "PyMuPDF and soffice are required for the real DOCX smoke test",
+    _smoke_dependencies_available(),
+    "soffice and either PyMuPDF or pdftoppm are required for the real DOCX smoke test",
 )
 class DocxPageRendererSmokeTests(unittest.TestCase):
     def test_real_minimal_docx_renders_a_png(self):
