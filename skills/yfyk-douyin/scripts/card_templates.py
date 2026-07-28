@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ctypes
+import errno
+import os
+import shutil
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 FONT_PATH = SKILL_DIR / "assets/cjk-font/NotoSansSC.ttf"
@@ -104,6 +110,54 @@ def _draw_frame(canvas: Image.Image, template_id: str, page_no: int, total_pages
     draw.rectangle((left, top, right - 1, bottom - 1), fill=SAFE_FILL)
 
 
+def _validate_framed_png(path: Path) -> None:
+    try:
+        with Image.open(path) as image:
+            if image.format != "PNG" or image.size != (WIDTH, HEIGHT):
+                raise ValueError(f"not a valid framed PNG: {path.name}")
+            image.verify()
+        with Image.open(path) as image:
+            image.load()
+    except ValueError:
+        raise
+    except (OSError, UnidentifiedImageError) as exc:
+        raise ValueError(f"not a valid framed PNG: {path.name}") from exc
+
+
+def _atomic_publish_directory_no_replace(staging_dir: Path, target_dir: Path) -> None:
+    """Atomically publish a directory without replacing any existing filesystem entry."""
+    source = os.fsencode(staging_dir)
+    target = os.fsencode(target_dir)
+    try:
+        if sys.platform == "darwin":
+            libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+            renamex_np = libc.renamex_np
+            renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            renamex_np.restype = ctypes.c_int
+            result = renamex_np(source, target, 0x00000004)  # RENAME_EXCL
+        elif sys.platform.startswith("linux"):
+            syscall_number = getattr(os, "SYS_renameat2", None)
+            if syscall_number is None:
+                syscall_number = {"x86_64": 316, "aarch64": 276}.get(os.uname().machine)
+            if syscall_number is None:
+                raise RuntimeError("atomic no-replace directory publication is unavailable")
+            libc = ctypes.CDLL(None, use_errno=True)
+            syscall = libc.syscall
+            syscall.restype = ctypes.c_long
+            result = syscall(syscall_number, -100, source, -100, target, 1)  # RENAME_NOREPLACE
+        else:
+            raise RuntimeError(f"atomic no-replace directory publication is unavailable on {sys.platform}")
+    except (AttributeError, OSError) as exc:
+        raise RuntimeError(f"atomic no-replace directory publication is unavailable: {exc}") from exc
+
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise FileExistsError(error_number, "target directory already exists", target_dir)
+    raise OSError(error_number, os.strerror(error_number), target_dir)
+
+
 def render_framed_page(
     source_page: Path,
     target: Path,
@@ -114,7 +168,13 @@ def render_framed_page(
     """Place one pre-rendered source page inside a fixed 1080×1440 template frame."""
     if template_id not in TEMPLATES:
         raise ValueError(f"unknown card template: {template_id}")
-    if page_no <= 0 or total_pages <= 0 or page_no > total_pages:
+    if (
+        type(page_no) is not int
+        or type(total_pages) is not int
+        or page_no <= 0
+        or total_pages <= 0
+        or page_no > total_pages
+    ):
         raise ValueError("page numbers must be positive and ordered")
     source_page = Path(source_page)
     target = Path(target)
@@ -132,7 +192,19 @@ def render_framed_page(
     y = SAFE_BOX[1] + (SAFE_BOX[3] - SAFE_BOX[1] - resized.height) // 2
     canvas.paste(resized, (x, y))
     target.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(target, format="PNG")
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}-",
+        suffix=".png",
+        dir=target.parent,
+    )
+    os.close(file_descriptor)
+    temporary = Path(temporary_name)
+    try:
+        canvas.save(temporary, format="PNG")
+        _validate_framed_png(temporary)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
     return target
 
 
@@ -143,11 +215,27 @@ def render_framed_pages(source_pages: list[Path], target_dir: Path, template_id:
     if not source_pages:
         raise ValueError("source pages must not be empty")
     target_dir = Path(target_dir)
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    if os.path.lexists(target_dir):
+        raise FileExistsError(errno.EEXIST, "target directory already exists", target_dir)
     total_pages = len(source_pages)
-    return [
-        render_framed_page(Path(source), target_dir / f"{index:03d}.png", template_id, index, total_pages)
-        for index, source in enumerate(source_pages, start=1)
-    ]
+    expected_names = [f"{index:03d}.png" for index in range(1, total_pages + 1)]
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{target_dir.name}-", dir=target_dir.parent))
+    try:
+        staged_pages = [
+            render_framed_page(Path(source), staging_dir / name, template_id, index, total_pages)
+            for index, (source, name) in enumerate(zip(source_pages, expected_names), start=1)
+        ]
+        if [path.name for path in staged_pages] != expected_names:
+            raise ValueError("framed page sequence is invalid")
+        if sorted(path.name for path in staging_dir.iterdir()) != expected_names:
+            raise ValueError("framed page staging directory is invalid")
+        for path in staged_pages:
+            _validate_framed_png(path)
+        _atomic_publish_directory_no_replace(staging_dir, target_dir)
+        return [target_dir / name for name in expected_names]
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 class CardRenderer:

@@ -1,7 +1,11 @@
+import math
+import os
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image, ImageDraw, UnidentifiedImageError
 
@@ -190,6 +194,162 @@ class CardTemplateTests(unittest.TestCase):
                 render_framed_page(missing, root / "out.png", "classic-gray", 1, 1)
             with self.assertRaises(UnidentifiedImageError):
                 render_framed_page(bad, root / "out.png", "classic-gray", 1, 1)
+
+    def test_framed_page_rejects_non_integer_and_invalid_page_numbers_for_every_template(self):
+        render_framed_page = self._frame_api()["render_framed_page"]
+        invalid_numbers = (
+            (True, 1),
+            (1, False),
+            (1.0, 1),
+            (1, 1.0),
+            (math.nan, 1),
+            (1, math.nan),
+            (0, 1),
+            (2, 1),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._marked_source(root / "source.png", (360, 720))
+            for template_id in sorted(self.EXPECTED_IDS):
+                for case_no, (page_no, total_pages) in enumerate(invalid_numbers):
+                    target = root / f"{template_id}-{case_no}.png"
+                    with self.assertRaisesRegex(ValueError, "page numbers"):
+                        render_framed_page(source, target, template_id, page_no, total_pages)
+                    self.assertFalse(target.exists())
+
+    def test_framed_page_interrupted_write_preserves_existing_target(self):
+        render_framed_page = self._frame_api()["render_framed_page"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._marked_source(root / "source.png", (360, 720))
+            target = root / "out.png"
+            original = b"existing target must survive"
+            target.write_bytes(original)
+
+            def interrupted_save(_image, path, *args, **kwargs):
+                Path(path).write_bytes(b"partial")
+                raise OSError("simulated write interruption")
+
+            with patch.object(Image.Image, "save", new=interrupted_save):
+                with self.assertRaisesRegex(OSError, "write interruption"):
+                    render_framed_page(source, target, "classic-gray", 1, 1)
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual(set(root.iterdir()), {source, target})
+
+    def test_framed_page_rejects_corrupt_staged_png_without_replacing_target(self):
+        render_framed_page = self._frame_api()["render_framed_page"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._marked_source(root / "source.png", (360, 720))
+            target = root / "out.png"
+            original = b"existing target must survive validation"
+            target.write_bytes(original)
+
+            def corrupt_save(_image, path, *args, **kwargs):
+                Path(path).write_bytes(b"not a png")
+
+            with patch.object(Image.Image, "save", new=corrupt_save):
+                with self.assertRaisesRegex(ValueError, "valid framed PNG"):
+                    render_framed_page(source, target, "classic-gray", 1, 1)
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual(set(root.iterdir()), {source, target})
+
+    def test_framed_pages_rejects_existing_directory_and_dangling_symlink(self):
+        render_framed_pages = self._frame_api()["render_framed_pages"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._marked_source(root / "source.png", (360, 720))
+            existing = root / "existing"
+            existing.mkdir()
+            old = existing / "001.png"
+            old.write_bytes(b"old short batch")
+            with self.assertRaises(FileExistsError):
+                render_framed_pages([source], existing, "minimal-white")
+            self.assertEqual(old.read_bytes(), b"old short batch")
+
+            dangling = root / "dangling"
+            dangling.symlink_to(root / "missing", target_is_directory=True)
+            with self.assertRaises(FileExistsError):
+                render_framed_pages([source], dangling, "minimal-white")
+            self.assertTrue(os.path.lexists(dangling))
+
+    def test_bad_second_page_leaves_no_published_or_staging_directory(self):
+        render_framed_pages = self._frame_api()["render_framed_pages"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = self._marked_source(root / "first.png", (360, 720))
+            bad = root / "bad.png"
+            bad.write_bytes(b"bad image")
+            target = root / "frames"
+            with self.assertRaises(UnidentifiedImageError):
+                render_framed_pages([first, bad], target, "classic-gray")
+            self.assertFalse(os.path.lexists(target))
+            self.assertFalse(any(path.name.startswith(".frames-") for path in root.iterdir()))
+
+    def test_sources_inside_numbered_target_directory_are_not_overwritten(self):
+        render_framed_pages = self._frame_api()["render_framed_pages"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "frames"
+            target.mkdir()
+            first = self._marked_source(target / "001.png", (300, 500), (180, 40, 50))
+            second = self._marked_source(target / "002.png", (310, 510), (40, 150, 80))
+            originals = [path.read_bytes() for path in (first, second)]
+            with self.assertRaises(FileExistsError):
+                render_framed_pages([first, second], target, "premium-dark")
+            self.assertEqual([path.read_bytes() for path in (first, second)], originals)
+
+    def test_target_appearing_during_batch_publish_is_not_replaced_or_mixed(self):
+        render_framed_pages = self._frame_api()["render_framed_pages"]
+        real_render_page = self._frame_api()["render_framed_page"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            sources = [
+                self._marked_source(root / f"source-{index}.png", (300, 500), color)
+                for index, color in enumerate(((180, 40, 50), (40, 150, 80)), start=1)
+            ]
+            target = root / "frames"
+
+            def external_target_arrives(source, staged_target, template_id, page_no, total_pages):
+                output = real_render_page(source, staged_target, template_id, page_no, total_pages)
+                if page_no == total_pages:
+                    target.mkdir()
+                    (target / "external.txt").write_text("keep me", encoding="utf-8")
+                return output
+
+            with patch.object(card_templates, "render_framed_page", side_effect=external_target_arrives):
+                with self.assertRaises(FileExistsError):
+                    render_framed_pages(sources, target, "classic-gray")
+            self.assertEqual([path.name for path in target.iterdir()], ["external.txt"])
+            self.assertEqual((target / "external.txt").read_text(encoding="utf-8"), "keep me")
+
+    def test_concurrent_batches_publish_one_complete_template_without_mixing(self):
+        render_framed_pages = self._frame_api()["render_framed_pages"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            colors = ((180, 40, 50), (40, 150, 80), (40, 80, 180))
+            sources = [
+                self._marked_source(root / f"source-{index}.png", (300, 500), color)
+                for index, color in enumerate(colors, start=1)
+            ]
+            target = root / "frames"
+
+            def run(template_id):
+                try:
+                    return "ok", template_id, render_framed_pages(sources, target, template_id)
+                except FileExistsError as exc:
+                    return "exists", template_id, exc
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(run, ("classic-gray", "premium-dark")))
+            self.assertEqual(sorted(status for status, _, _ in results), ["exists", "ok"])
+            self.assertEqual(sorted(path.name for path in target.iterdir()), ["001.png", "002.png", "003.png"])
+            corner_colors = []
+            for index, expected_color in enumerate(colors, start=1):
+                with Image.open(target / f"{index:03d}.png").convert("RGB") as image:
+                    corner_colors.append(image.getpixel((0, 0)))
+                    self.assertEqual(image.getpixel((540, 720)), expected_color)
+            self.assertEqual(len(set(corner_colors)), 1)
 
     @staticmethod
     def _marked_source(path: Path, size: tuple[int, int], fill: tuple[int, int, int] = (35, 155, 210)) -> Path:
