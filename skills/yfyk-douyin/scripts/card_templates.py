@@ -10,6 +10,8 @@ from PIL import Image, ImageDraw, ImageFont
 SKILL_DIR = Path(__file__).resolve().parent.parent
 FONT_PATH = SKILL_DIR / "assets/cjk-font/NotoSansSC.ttf"
 WIDTH, HEIGHT = 1080, 1440
+SAFE_BOX = (90, 120, 990, 1320)
+SAFE_FILL = "#FAFAF8"
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,96 @@ def wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> lis
     if current:
         lines.append(current)
     return lines or [""]
+
+
+def contain_size(width: int, height: int, max_width: int, max_height: int) -> tuple[int, int]:
+    """Return the largest whole-pixel size that fits within the supplied bounds."""
+    if min(width, height, max_width, max_height) <= 0:
+        raise ValueError("image and container dimensions must be positive")
+    scale = min(max_width / width, max_height / height)
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
+def _draw_frame(canvas: Image.Image, template_id: str, page_no: int, total_pages: int) -> None:
+    """Draw a template's ornament outside the shared source-safe area."""
+    spec = TEMPLATES[template_id]
+    draw = ImageDraw.Draw(canvas)
+    left, top, right, bottom = SAFE_BOX
+
+    if spec.variant == "classic":
+        draw.rectangle((0, 0, WIDTH - 1, HEIGHT - 1), fill="#EAE3DA")
+        draw.rectangle((72, top - 18, left - 1, bottom + 20), fill="#D7CEC3")
+        draw.rectangle((right, top - 6, right + 17, bottom + 32), fill="#D7CEC3")
+        draw.rectangle((left - 18, bottom, right + 20, bottom + 17), fill="#D7CEC3")
+        draw.rectangle((48, 48, WIDTH - 49, HEIGHT - 49), outline="#FFFFFF", width=3)
+    elif spec.variant == "editorial":
+        draw.rectangle((0, 0, WIDTH - 1, HEIGHT - 1), fill="#F6F0E8")
+        draw.rectangle((42, 34, WIDTH - 43, 50), fill="#B74D36")
+        draw.rectangle((42, 34, WIDTH - 43, HEIGHT - 43), outline="#DCCFC0", width=2)
+        font = load_font(24)
+        page_label = f"{page_no:02d}/{total_pages:02d}"
+        draw.text((1002, 130), page_label, font=font, fill="#B74D36", anchor="la")
+    elif spec.variant == "premium":
+        draw.rectangle((0, 0, WIDTH - 1, HEIGHT - 1), fill="#172A3A")
+        draw.ellipse((1002, -56, 1226, 168), outline="#D9AF67", width=3)
+        draw.ellipse((1042, -16, 1186, 128), outline="#D9AF67", width=1)
+        draw.rectangle((50, 52, WIDTH - 51, HEIGHT - 53), outline="#294154", width=2)
+        font = load_font(16)
+        draw.text((90, 1360), "DOUYIN GRAPHIC · REPORT", font=font, fill="#D9AF67")
+    else:
+        draw.rectangle((0, 0, WIDTH - 1, HEIGHT - 1), fill="#FFFFFF")
+        draw.rectangle((46, 52, WIDTH - 47, HEIGHT - 53), outline="#D5D8DA", width=2)
+        font = load_font(20)
+        draw.text((1004, 1350), f"{page_no:02d}", font=font, fill="#4A4F54")
+
+    # This is deliberately last: every template exposes the exact same source area.
+    draw.rectangle((left, top, right - 1, bottom - 1), fill=SAFE_FILL)
+
+
+def render_framed_page(
+    source_page: Path,
+    target: Path,
+    template_id: str,
+    page_no: int,
+    total_pages: int,
+) -> Path:
+    """Place one pre-rendered source page inside a fixed 1080×1440 template frame."""
+    if template_id not in TEMPLATES:
+        raise ValueError(f"unknown card template: {template_id}")
+    if page_no <= 0 or total_pages <= 0 or page_no > total_pages:
+        raise ValueError("page numbers must be positive and ordered")
+    source_page = Path(source_page)
+    target = Path(target)
+    if not source_page.is_file():
+        raise FileNotFoundError(source_page)
+
+    with Image.open(source_page) as source:
+        source_rgb = source.convert("RGB")
+    resized_size = contain_size(source_rgb.width, source_rgb.height, SAFE_BOX[2] - SAFE_BOX[0], SAFE_BOX[3] - SAFE_BOX[1])
+    resized = source_rgb.resize(resized_size, Image.Resampling.LANCZOS)
+
+    canvas = Image.new("RGB", (WIDTH, HEIGHT))
+    _draw_frame(canvas, template_id, page_no, total_pages)
+    x = SAFE_BOX[0] + (SAFE_BOX[2] - SAFE_BOX[0] - resized.width) // 2
+    y = SAFE_BOX[1] + (SAFE_BOX[3] - SAFE_BOX[1] - resized.height) // 2
+    canvas.paste(resized, (x, y))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(target, format="PNG")
+    return target
+
+
+def render_framed_pages(source_pages: list[Path], target_dir: Path, template_id: str) -> list[Path]:
+    """Frame source pages in their supplied order, using stable numbered PNG filenames."""
+    if template_id not in TEMPLATES:
+        raise ValueError(f"unknown card template: {template_id}")
+    if not source_pages:
+        raise ValueError("source pages must not be empty")
+    target_dir = Path(target_dir)
+    total_pages = len(source_pages)
+    return [
+        render_framed_page(Path(source), target_dir / f"{index:03d}.png", template_id, index, total_pages)
+        for index, source in enumerate(source_pages, start=1)
+    ]
 
 
 class CardRenderer:
