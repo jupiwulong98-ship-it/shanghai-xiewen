@@ -301,9 +301,13 @@ def validate_release(job_path: Path, output_dir: Path) -> list[dict[str, str]]:
                 f"未知或缺失 content_mode：{mode!r}",
             ))
 
-        sizes, corrupt_media, media_count = media_audit(output)
-        card_media = published_card_media(output)
-        card_sizes, corrupt_cards = card_media_audit(output, card_media)
+        try:
+            sizes, corrupt_media, media_count = media_audit(output)
+            card_media = published_card_media(output)
+            card_sizes, corrupt_cards = card_media_audit(output, card_media)
+        except (OSError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
+            errors.append(diagnostic(source, str(output), "INVALID_DOCX", str(exc)))
+            continue
         if not card_media:
             errors.append(diagnostic(source, str(output), "NO_CARDS", "DOCX 未嵌入图片"))
         for name in corrupt_media:

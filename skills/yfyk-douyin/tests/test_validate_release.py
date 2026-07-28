@@ -322,6 +322,26 @@ class ValidateTests(unittest.TestCase):
             self.assertIn("CORRUPT_MEDIA", codes)
             self.assertNotIn("NO_CARDS", codes)
 
+    def test_missing_document_relationships_reports_invalid_docx_without_crashing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            job = self.make_job(root)
+            output = root / "out"
+            build_release(job, output)
+            release = output / "release.docx"
+            rewritten = root / "missing-relationships.docx"
+            with zipfile.ZipFile(release) as source, zipfile.ZipFile(rewritten, "w") as target:
+                for item in source.infolist():
+                    if item.filename != "word/_rels/document.xml.rels":
+                        target.writestr(item, source.read(item.filename))
+            rewritten.replace(release)
+
+            errors = validate_release(job, output)
+
+            invalid = [error for error in errors if error["code"] == "INVALID_DOCX"]
+            self.assertTrue(invalid)
+            self.assertEqual(invalid[0]["output_path"], str(release))
+
     def test_unsafe_output_filename_is_rejected_without_path_escape(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
