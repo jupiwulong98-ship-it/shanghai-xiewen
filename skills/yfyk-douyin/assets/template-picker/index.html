@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>选择抖音卡片模板</title>
+  <style>
+    :root{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;color:#172331;background:#f4f2ee}
+    body{margin:0;padding:32px}main{max-width:1320px;margin:auto}h1{margin:0 0 8px}.sub{color:#63707b;margin:0 0 24px}
+    .grid{display:grid;grid-template-columns:repeat(5,minmax(170px,1fr));gap:16px}
+    button{appearance:none;text-align:left;border:2px solid transparent;background:white;border-radius:14px;padding:10px;cursor:pointer;box-shadow:0 8px 24px #17233114}
+    button:hover,button:focus-visible{transform:translateY(-2px);outline:none;border-color:#d48460}button.selected{border-color:#c65b35;box-shadow:0 0 0 4px #c65b3522}
+    img,.random{display:block;width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:8px}.label{display:block;font-weight:700;font-size:15px;margin:10px 2px 2px}.note{font-size:12px;color:#737b83;margin:0 2px}
+    .random{background:#202733;display:grid;grid-template-columns:1fr 1fr;gap:7px;padding:18px;box-sizing:border-box}.random img{aspect-ratio:3/4;border-radius:4px}
+    #confirm{display:block;margin:24px auto 0;background:#c65b35;color:white;border:0;padding:12px 28px;font-size:15px;text-align:center;box-shadow:none}#confirm:disabled{opacity:.45;cursor:not-allowed}
+    #status{text-align:center;margin-top:14px;color:#53606c}@media(max-width:980px){.grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:620px){body{padding:18px}.grid{grid-template-columns:repeat(2,1fr)}}
+  </style>
+</head>
+<body>
+<main>
+  <h1>选择卡片模板</h1>
+  <p class="sub">预览图由正式卡片渲染器生成。单篇或整批使用一种模板，也可选择均衡随机。</p>
+  <div class="grid" id="choices">
+    <button data-choice="classic-gray"><img src="/previews/classic-gray.png" alt="经典灰边预览"><span class="label">经典灰边</span><span class="note">通用稳妥</span></button>
+    <button data-choice="editorial-warm"><img src="/previews/editorial-warm.png" alt="品牌杂志预览"><span class="label">品牌杂志</span><span class="note">暖白砖红</span></button>
+    <button data-choice="premium-dark"><img src="/previews/premium-dark.png" alt="深色质感预览"><span class="label">深色质感</span><span class="note">深蓝金色</span></button>
+    <button data-choice="minimal-white"><img src="/previews/minimal-white.png" alt="极简白纸预览"><span class="label">极简白纸</span><span class="note">强排版长阅读</span></button>
+    <button data-choice="balanced-random"><span class="random"><img src="/previews/classic-gray.png" alt=""><img src="/previews/editorial-warm.png" alt=""><img src="/previews/premium-dark.png" alt=""><img src="/previews/minimal-white.png" alt=""></span><span class="label">均衡随机</span><span class="note">批量数量尽量平均</span></button>
+  </div>
+  <button id="confirm" disabled>确认选择</button>
+  <p id="status"></p>
+</main>
+<script>
+  let selected="";
+  const confirmButton=document.querySelector("#confirm");
+  document.querySelectorAll("[data-choice]").forEach(button=>{
+    button.addEventListener("click",()=>{
+      document.querySelectorAll("[data-choice]").forEach(item=>item.classList.remove("selected"));
+      button.classList.add("selected");selected=button.dataset.choice;confirmButton.disabled=false;
+    });
+  });
+  confirmButton.addEventListener("click",async()=>{
+    confirmButton.disabled=true;
+    const response=await fetch("/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({choice:selected})});
+    const payload=await response.json();
+    document.querySelector("#status").textContent=response.ok?"已选择："+payload.display_name:"选择失败："+payload.error;
+  });
+</script>
+</body>
+</html>
