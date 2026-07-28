@@ -1,11 +1,11 @@
 ---
 name: yfyk-douyin
-description: Convert one or more ranking or non-ranking article, research, report, or observation DOCX files into complete editable Douyin graphic-post release DOCX files with clickable visual template selection and balanced-random batch styling. Use for 3:4 Douyin cards, batch channel delivery, editable copy, or complete embedded source cards.
+description: Convert source DOCX pages into frame-only Douyin cards and editable release DOCX files with chat-native template selection and balanced-random batch styling. Use for 3:4 Douyin cards, batch channel delivery, editable copy, or complete embedded source cards.
 ---
 
 # YFYK Douyin
 
-Produce one final release DOCX per source DOCX. Keep title, body content, and tags editable; preserve the complete source as embedded 1080×1440 cards; leave only final DOCX files in the delivery directory.
+Produce one final release DOCX per source DOCX. The editable release home (title, body content, and tags) is generated from `inspection.json`; source cards are a separate faithful visual record. The governing contract is: one source DOCX page becomes one card; never reflow source blocks into production cards; frame decorations must stay outside SAFE_BOX. Render each source page, then add a pure outer frame. Leave only final DOCX files in the delivery directory.
 
 ## Required workflow
 
@@ -25,10 +25,10 @@ python3 scripts/inspect_sources.py \
    - If `AMBIGUOUS_RANKING` appears, show only the candidate headings and ordered names, then ask the user to choose.
    - For articles, infer the publishing brand only from a clear repeated brand-shaped subject. If absent or ambiguous, ask.
    - User-provided title, intro, brand, keyword, or tags always override inference.
-5. Generate real production previews before creating `job.json`:
+5. Generate the editable release home from the inspected source, then generate real production previews before choosing a template and before creating `job.json`. Always preview the actual first source page. Call `generate_previews(source_docx, session_dir)` with the selected source DOCX and its picker session directory. For one shared batch choice, use the first source DOCX's first page only; do not imply that every batch document has been previewed.
 
 ```bash
-python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, "scripts"); from template_picker import generate_previews; print(generate_previews(Path("/absolute/temp/template-picker")))'
+python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, "scripts"); from template_picker import generate_previews; print(generate_previews(Path("/absolute/source.docx"), Path("/absolute/temp/template-picker")))'
 ```
 
    Use this interaction order:
@@ -38,6 +38,7 @@ python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, "scripts");
 
 ```bash
 python3 scripts/template_picker.py \
+  --source "/absolute/source.docx" \
   --work-dir "/absolute/temp/template-picker" \
   --result "/absolute/temp/template-selection.json" \
   --open-browser
@@ -71,6 +72,7 @@ Fix every diagnostic before delivery.
 
 - Apply the detailed grounding, tag, source-preservation, and delivery rules in [references/content_rules.md](references/content_rules.md).
 - Generate picker previews and final cards through the same production renderer.
+- The production renderer is source page rendering → pure outer frame. It must never fall back to text-block reflow for production cards.
 - Ranking hierarchy: `正文` → intro → `本次榜单排名如下：` → real numbered list.
 - Article hierarchy: `正文` → intro → `核心要点` → 3–5 real bullet items.
 
@@ -79,6 +81,7 @@ Fix every diagnostic before delivery.
 - Output count equals source DOCX count.
 - Output directory contains final `.docx` files only.
 - Each card is 1080×1440.
+- One source DOCX page becomes one card; production cards never reflow source blocks.
 - Cards are embedded; no separate image folder remains.
 - Source files are never modified.
 - Existing output files are not overwritten by default.

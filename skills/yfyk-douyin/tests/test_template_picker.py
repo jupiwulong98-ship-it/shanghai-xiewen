@@ -72,6 +72,35 @@ class TemplatePickerTests(unittest.TestCase):
             skill,
         )
 
+    def test_frame_only_card_workflow_is_documented(self):
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        content_rules = (ROOT / "references" / "content_rules.md").read_text(
+            encoding="utf-8"
+        )
+        job_schema = (ROOT / "references" / "job_schema.md").read_text(
+            encoding="utf-8"
+        )
+        metadata = (ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
+
+        for phrase in (
+            "one source DOCX page becomes one card",
+            "never reflow source blocks into production cards",
+            "frame decorations must stay outside SAFE_BOX",
+            "preview the actual first source page",
+        ):
+            self.assertIn(phrase, skill)
+        self.assertIn("generate_previews(source_docx, session_dir)", skill)
+        self.assertIn("--source", skill)
+        self.assertIn("source page rendering", skill)
+        self.assertIn("pure outer frame", skill)
+        self.assertIn("one source DOCX page becomes one card", content_rules)
+        self.assertIn("never reflow source blocks into production cards", content_rules)
+        self.assertIn("do not crop, stretch, or duplicate", content_rules)
+        self.assertIn("card_template controls only the outer frame", job_schema)
+        self.assertIn("four registered IDs", job_schema)
+        self.assertIn("balanced-random seed", job_schema)
+        self.assertIn("frame-only", metadata)
+
     def test_new_picker_session_clears_stale_selection(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

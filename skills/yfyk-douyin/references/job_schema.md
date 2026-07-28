@@ -115,14 +115,15 @@ Review this `inspection.json` and use its source paths, content modes, candidate
 }
 ```
 
-The assignment metadata records how values were created. The builder reads only each materialized `card_template` and never rerandomizes.
+The assignment metadata records how values were created. The builder reads only each materialized `card_template` and never rerandomizes. The balanced-random seed and the four-ID balancing behavior remain unchanged.
 
 ## Constraints
 
 - Job-level fields: `version` must be integer `1`; `documents` is an array.
 - Common document fields are required and non-empty: `source_path`, `output_filename`, `title`, `intro`, `brand`, `keyword`, `content_mode`, `card_template`, and `tags`.
 - Common types: path/title/intro/brand/keyword are strings; `content_mode` is exactly `"ranking"` or `"article"`; `tags` is a non-empty array of non-empty strings.
-- `card_template` is exactly one registered ID: `classic-gray`, `editorial-warm`, `premium-dark`, or `minimal-white`. `balanced-random` is an assignment mode, not a valid per-document template.
+- The card_template controls only the outer frame; it never changes, reflows, crops, stretches, duplicates, or otherwise reconstructs source-page content.
+- `card_template` is exactly one of four registered IDs: `classic-gray`, `editorial-warm`, `premium-dark`, or `minimal-white`. `balanced-random` is an assignment mode, not a valid per-document template.
 - Old jobs without `card_template` are invalid and must return to the visual picker.
 - Output filenames must be unique, end in `.docx`, and contain no `/` or `\`; choose a safe unique basename for every source.
 - Tags must contain exact array members `#<brand>` and `#<keyword>`; substrings such as `#品牌A其他` do not satisfy `#品牌A`.

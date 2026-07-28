@@ -6,12 +6,14 @@
 - Preserve ranking order, names, descriptions, and scores exactly from the confirmed candidate.
 - Tags must include the confirmed publishing brand and the main keyword.
 - User-provided title, brand, keyword, intro, or tags override inferred values.
-- Convert complete source blocks to 1080×1440 cards. Do not silently summarize or cap page count.
+- Content fidelity is mandatory: one source DOCX page becomes one card. Render each complete source page to a 1080×1440 production card; do not silently summarize or cap page count.
+- Content fidelity contract: never reflow source blocks into production cards. Production rendering is source page rendering followed only by a pure outer frame; frame decorations must stay outside SAFE_BOX.
+- Content fidelity contract: do not crop, stretch, or duplicate source pages. Preserve every rendered page once, in order, at its aspect ratio within the card.
 - Require the user to choose one of `classic-gray`, `editorial-warm`, `premium-dark`, `minimal-white`, or the `balanced-random` assignment mode through real production previews.
 - Store a registered fixed template ID in every document's `card_template`; never store `balanced-random` as a document template and never choose an implicit default.
 - For balanced batches, keep template counts within one of each other, record the seed and materialized assignments, and never rerandomize during build.
 - Generate picker previews and final cards with the same template registry and rendering path.
-- Preserve source paragraphs, tables, and images in document order; embed every card in the final DOCX.
+- Preserve source paragraphs, tables, and images through the rendered source pages in document order; embed every card in the final DOCX.
 - Embed cards in the final DOCX. Do not leave PNG, PDF, JSON, or QA files in the delivery directory.
 - Always ask the user to confirm the output directory.
 - A missing ranking selects article mode; it never stops delivery.
