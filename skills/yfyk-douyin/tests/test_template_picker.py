@@ -91,6 +91,10 @@ class TemplatePickerTests(unittest.TestCase):
             self.assertIn(phrase, skill)
         self.assertIn("generate_previews(source_docx, session_dir)", skill)
         self.assertIn("--source", skill)
+        self.assertIn("fresh, unused session directory", skill)
+        self.assertIn('"/absolute/temp/template-picker-legacy"', skill)
+        self.assertIn("Draft editable home fields", skill)
+        self.assertIn("`build_release.py` generates the editable release home", skill)
         self.assertIn("source page rendering", skill)
         self.assertIn("pure outer frame", skill)
         self.assertIn("one source DOCX page becomes one card", content_rules)
@@ -99,6 +103,8 @@ class TemplatePickerTests(unittest.TestCase):
         self.assertIn("card_template controls only the outer frame", job_schema)
         self.assertIn("four registered IDs", job_schema)
         self.assertIn("balanced-random seed", job_schema)
+        self.assertIn('"premium-dark": 1', job_schema)
+        self.assertIn('"classic-gray": 0', job_schema)
         self.assertIn("frame-only", metadata)
 
     def test_new_picker_session_clears_stale_selection(self):

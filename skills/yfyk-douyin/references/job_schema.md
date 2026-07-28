@@ -92,10 +92,10 @@ Review this `inspection.json` and use its source paths, content modes, candidate
     "mode": "balanced-random",
     "seed": "2026-07-28T10:30:00+08:00",
     "counts": {
-      "classic-gray": 13,
-      "editorial-warm": 13,
-      "premium-dark": 12,
-      "minimal-white": 12
+      "classic-gray": 0,
+      "editorial-warm": 0,
+      "premium-dark": 1,
+      "minimal-white": 0
     }
   },
   "documents": [

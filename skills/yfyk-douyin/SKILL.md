@@ -5,7 +5,7 @@ description: Convert source DOCX pages into frame-only Douyin cards and editable
 
 # YFYK Douyin
 
-Produce one final release DOCX per source DOCX. The editable release home (title, body content, and tags) is generated from `inspection.json`; source cards are a separate faithful visual record. The governing contract is: one source DOCX page becomes one card; never reflow source blocks into production cards; frame decorations must stay outside SAFE_BOX. Render each source page, then add a pure outer frame. Leave only final DOCX files in the delivery directory.
+Produce one final release DOCX per source DOCX. Draft editable release-home fields (title, body content, and tags) from `inspection.json`; `build_release.py` generates the editable release home from those job fields. Source cards are a separate faithful visual record. The governing contract is: one source DOCX page becomes one card; never reflow source blocks into production cards; frame decorations must stay outside SAFE_BOX. Render each source page, then add a pure outer frame. Leave only final DOCX files in the delivery directory.
 
 ## Required workflow
 
@@ -25,7 +25,7 @@ python3 scripts/inspect_sources.py \
    - If `AMBIGUOUS_RANKING` appears, show only the candidate headings and ordered names, then ask the user to choose.
    - For articles, infer the publishing brand only from a clear repeated brand-shaped subject. If absent or ambiguous, ask.
    - User-provided title, intro, brand, keyword, or tags always override inference.
-5. Generate the editable release home from the inspected source, then generate real production previews before choosing a template and before creating `job.json`. Always preview the actual first source page. Call `generate_previews(source_docx, session_dir)` with the selected source DOCX and its picker session directory. For one shared batch choice, use the first source DOCX's first page only; do not imply that every batch document has been previewed.
+5. Draft editable home fields (title, intro, brand, keyword, and tags) from the inspected source, then generate real production previews before choosing a template and before creating `job.json`. `build_release.py` generates the editable release home from these job fields. Always preview the actual first source page. Call `generate_previews(source_docx, session_dir)` with the selected source DOCX and its picker session directory. For one shared batch choice, use the first source DOCX's first page only; do not imply that every batch document has been previewed.
 
 ```bash
 python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, "scripts"); from template_picker import generate_previews; print(generate_previews(Path("/absolute/source.docx"), Path("/absolute/temp/template-picker")))'
@@ -34,12 +34,12 @@ python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, "scripts");
    Use this interaction order:
    - If the ChatCut `ask_followup_questions` tool is available, call it with one `single` field using `variant: visual`. Show the four generated preview images plus `balanced-random` directly in the current chat. When the tool requires preview URLs, serve only the generated preview directory through a temporary loopback HTTP server without opening it in a browser; stop that server after the user submits.
    - Otherwise, show the four preview images in chat with numbered choices and wait for the user's reply.
-   - Use the legacy webpage picker only when chat-native selection is unavailable and the user explicitly agrees:
+   - Use the legacy webpage picker only when chat-native selection is unavailable and the user explicitly agrees. It must use a fresh, unused session directory, never the preview directory already generated for chat-native selection:
 
 ```bash
 python3 scripts/template_picker.py \
   --source "/absolute/source.docx" \
-  --work-dir "/absolute/temp/template-picker" \
+  --work-dir "/absolute/temp/template-picker-legacy" \
   --result "/absolute/temp/template-selection.json" \
   --open-browser
 ```
