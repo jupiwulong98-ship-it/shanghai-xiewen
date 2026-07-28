@@ -124,6 +124,22 @@ def _validate_framed_png(path: Path) -> None:
         raise ValueError(f"not a valid framed PNG: {path.name}") from exc
 
 
+def _set_published_permissions(path: Path, mode: int) -> None:
+    try:
+        path.chmod(mode)
+    except OSError as exc:
+        raise RuntimeError(f"failed to set framed card permissions: {path}") from exc
+
+
+def _clean_staging_directory(staging_dir: Path) -> None:
+    try:
+        shutil.rmtree(staging_dir)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(f"failed to clean framed card staging directory: {staging_dir}") from exc
+
+
 def _atomic_publish_directory_no_replace(staging_dir: Path, target_dir: Path) -> None:
     """Atomically publish a directory without replacing any existing filesystem entry."""
     source = os.fsencode(staging_dir)
@@ -199,12 +215,16 @@ def render_framed_page(
     )
     os.close(file_descriptor)
     temporary = Path(temporary_name)
+    published = False
     try:
         canvas.save(temporary, format="PNG")
         _validate_framed_png(temporary)
+        _set_published_permissions(temporary, 0o644)
         os.replace(temporary, target)
+        published = True
     finally:
-        temporary.unlink(missing_ok=True)
+        if not published:
+            temporary.unlink(missing_ok=True)
     return target
 
 
@@ -221,6 +241,7 @@ def render_framed_pages(source_pages: list[Path], target_dir: Path, template_id:
     total_pages = len(source_pages)
     expected_names = [f"{index:03d}.png" for index in range(1, total_pages + 1)]
     staging_dir = Path(tempfile.mkdtemp(prefix=f".{target_dir.name}-", dir=target_dir.parent))
+    published = False
     try:
         staged_pages = [
             render_framed_page(Path(source), staging_dir / name, template_id, index, total_pages)
@@ -232,10 +253,13 @@ def render_framed_pages(source_pages: list[Path], target_dir: Path, template_id:
             raise ValueError("framed page staging directory is invalid")
         for path in staged_pages:
             _validate_framed_png(path)
+        _set_published_permissions(staging_dir, 0o755)
         _atomic_publish_directory_no_replace(staging_dir, target_dir)
+        published = True
         return [target_dir / name for name in expected_names]
     finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        if not published:
+            _clean_staging_directory(staging_dir)
 
 
 class CardRenderer:

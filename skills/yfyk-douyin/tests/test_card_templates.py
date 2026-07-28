@@ -1,5 +1,6 @@
 import math
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -254,6 +255,36 @@ class CardTemplateTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), original)
             self.assertEqual(set(root.iterdir()), {source, target})
 
+    def test_framed_page_publishes_readable_0644_png(self):
+        render_framed_page = self._frame_api()["render_framed_page"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._marked_source(root / "source.png", (360, 720))
+            target = render_framed_page(source, root / "out.png", "classic-gray", 1, 1)
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
+            else:
+                self.assertTrue(os.access(target, os.R_OK))
+
+    def test_framed_page_does_not_delete_new_owner_reusing_published_temp_name(self):
+        render_framed_page = self._frame_api()["render_framed_page"]
+        real_replace = os.replace
+        reused = {}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._marked_source(root / "source.png", (360, 720))
+            target = root / "out.png"
+
+            def replace_then_reuse(temporary, published):
+                real_replace(temporary, published)
+                reused["path"] = Path(temporary)
+                reused["path"].write_bytes(b"new owner")
+
+            with patch.object(card_templates.os, "replace", side_effect=replace_then_reuse):
+                self.assertEqual(render_framed_page(source, target, "classic-gray", 1, 1), target)
+            self.assertTrue(reused["path"].is_file())
+            self.assertEqual(reused["path"].read_bytes(), b"new owner")
+
     def test_framed_pages_rejects_existing_directory_and_dangling_symlink(self):
         render_framed_pages = self._frame_api()["render_framed_pages"]
         with tempfile.TemporaryDirectory() as temp:
@@ -285,6 +316,22 @@ class CardTemplateTests(unittest.TestCase):
                 render_framed_pages([first, bad], target, "classic-gray")
             self.assertFalse(os.path.lexists(target))
             self.assertFalse(any(path.name.startswith(".frames-") for path in root.iterdir()))
+
+    def test_failed_batch_reports_staging_cleanup_error(self):
+        render_framed_pages = self._frame_api()["render_framed_pages"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = self._marked_source(root / "first.png", (360, 720))
+            bad = root / "bad.png"
+            bad.write_bytes(b"bad image")
+            with patch.object(card_templates.shutil, "rmtree", side_effect=OSError("cleanup denied")):
+                try:
+                    render_framed_pages([first, bad], root / "frames", "classic-gray")
+                except Exception as exc:
+                    self.assertIsInstance(exc, RuntimeError)
+                    self.assertIn("failed to clean framed card staging directory", str(exc))
+                else:
+                    self.fail("staging cleanup failure was not reported")
 
     def test_sources_inside_numbered_target_directory_are_not_overwritten(self):
         render_framed_pages = self._frame_api()["render_framed_pages"]
@@ -350,6 +397,44 @@ class CardTemplateTests(unittest.TestCase):
                     corner_colors.append(image.getpixel((0, 0)))
                     self.assertEqual(image.getpixel((540, 720)), expected_color)
             self.assertEqual(len(set(corner_colors)), 1)
+
+    def test_framed_pages_publish_readable_0755_directory_and_0644_pngs(self):
+        render_framed_pages = self._frame_api()["render_framed_pages"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            sources = [
+                self._marked_source(root / f"source-{index}.png", (300, 500), color)
+                for index, color in enumerate(((180, 40, 50), (40, 150, 80)), start=1)
+            ]
+            target = root / "frames"
+            outputs = render_framed_pages(sources, target, "minimal-white")
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+                self.assertEqual([stat.S_IMODE(path.stat().st_mode) for path in outputs], [0o644, 0o644])
+            else:
+                self.assertTrue(os.access(target, os.R_OK | os.X_OK))
+                self.assertTrue(all(os.access(path, os.R_OK) for path in outputs))
+
+    def test_framed_pages_do_not_delete_new_owner_reusing_published_staging_name(self):
+        render_framed_pages = self._frame_api()["render_framed_pages"]
+        real_publish = card_templates._atomic_publish_directory_no_replace
+        reused = {}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._marked_source(root / "source.png", (360, 720))
+            target = root / "frames"
+
+            def publish_then_reuse(staging, published):
+                real_publish(staging, published)
+                reused["path"] = Path(staging)
+                reused["path"].mkdir()
+                (reused["path"] / "new-owner.txt").write_text("keep me", encoding="utf-8")
+
+            with patch.object(card_templates, "_atomic_publish_directory_no_replace", side_effect=publish_then_reuse):
+                outputs = render_framed_pages([source], target, "premium-dark")
+            self.assertEqual(outputs, [target / "001.png"])
+            self.assertTrue((reused["path"] / "new-owner.txt").is_file())
+            self.assertEqual((reused["path"] / "new-owner.txt").read_text(encoding="utf-8"), "keep me")
 
     @staticmethod
     def _marked_source(path: Path, size: tuple[int, int], fill: tuple[int, int, int] = (35, 155, 210)) -> Path:
