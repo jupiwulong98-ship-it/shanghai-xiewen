@@ -59,6 +59,9 @@ class CardTemplateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 contain_size(*dimensions)
 
+    def test_safe_box_has_the_fixed_production_geometry(self):
+        self.assertEqual(self._frame_api()["SAFE_BOX"], (90, 120, 990, 1320))
+
     def test_framed_page_contains_sources_without_cropping_or_distortion(self):
         api = self._frame_api()
         width, height, safe_box = api["WIDTH"], api["HEIGHT"], api["SAFE_BOX"]
@@ -100,19 +103,76 @@ class CardTemplateTests(unittest.TestCase):
             outer_regions = [self._outside_safe_box_bytes(image) for image in rendered.values()]
             self.assertEqual(len(set(outer_regions)), len(self.EXPECTED_IDS))
 
+    def test_each_frame_has_its_specified_outer_style_without_safe_box_decoration(self):
+        api = self._frame_api()
+        safe_box, render_framed_page = api["SAFE_BOX"], api["render_framed_page"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._marked_source(root / "source.png", (360, 720))
+            frames = {}
+            for template_id in sorted(self.EXPECTED_IDS):
+                target = root / f"{template_id}.png"
+                render_framed_page(source, target, template_id, 2, 4)
+                with Image.open(target).convert("RGB") as image:
+                    frames[template_id] = image.copy()
+
+            self.assertEqual(frames["classic-gray"].getpixel((0, 0)), (234, 227, 218))
+            self._assert_region_outside_safe((72, 102, 90, 1320), safe_box)
+            self.assertEqual(frames["classic-gray"].getpixel((80, 200)), (215, 206, 195))
+            self._assert_region_outside_safe((48, 48, 51, 51), safe_box)
+            self.assertEqual(frames["classic-gray"].getpixel((48, 48)), (255, 255, 255))
+
+            self.assertEqual(frames["editorial-warm"].getpixel((0, 0)), (246, 240, 232))
+            self._assert_region_outside_safe((42, 34, 1038, 51), safe_box)
+            self.assertEqual(frames["editorial-warm"].getpixel((100, 42)), (183, 77, 54))
+            self._assert_region_outside_safe((990, 120, 1080, 190), safe_box)
+            self.assertTrue(self._region_has_color(frames["editorial-warm"], (990, 120, 1080, 190), (183, 77, 54)))
+
+            self.assertEqual(frames["premium-dark"].getpixel((0, 0)), (23, 42, 58))
+            self._assert_region_outside_safe((1002, 0, 1080, 169), safe_box)
+            self.assertTrue(self._region_has_color(frames["premium-dark"], (1002, 0, 1080, 169), (217, 175, 103)))
+            self._assert_region_outside_safe((90, 1320, 400, 1390), safe_box)
+            self.assertTrue(self._region_has_color(frames["premium-dark"], (90, 1320, 400, 1390), (217, 175, 103)))
+
+            self.assertEqual(frames["minimal-white"].getpixel((0, 0)), (255, 255, 255))
+            self._assert_region_outside_safe((46, 52, 48, 120), safe_box)
+            self.assertEqual(frames["minimal-white"].getpixel((46, 100)), (213, 216, 218))
+            self._assert_region_outside_safe((990, 1320, 1080, 1390), safe_box)
+            self.assertTrue(self._region_has_color(frames["minimal-white"], (990, 1320, 1080, 1390), (74, 79, 84), tolerance=64))
+
+            for image in frames.values():
+                self.assertEqual(image.crop(safe_box).getpixel((10, 10)), (255, 255, 255))
+
     def test_framed_page_batch_preserves_order_count_and_numbered_names(self):
         render_framed_pages = self._frame_api()["render_framed_pages"]
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            colors = [(190, 40, 50), (45, 145, 80), (45, 90, 190)]
             sources = [
-                self._marked_source(root / f"source-{index}.png", (300 + index, 500 + index))
-                for index in range(3)
+                self._marked_source(root / f"source-{index}.png", (300 + index, 500 + index), colors[index])
+                for index in range(len(colors))
             ]
             outputs = render_framed_pages(sources, root / "frames", "minimal-white")
             self.assertEqual([path.name for path in outputs], ["001.png", "002.png", "003.png"])
             self.assertEqual(len(outputs), len(sources))
             for output in outputs:
                 self.assertTrue(output.is_file())
+            for output, color in zip(outputs, colors):
+                with Image.open(output).convert("RGB") as image:
+                    self.assertEqual(image.getpixel((540, 720)), color)
+
+    def test_editorial_three_digit_page_number_is_right_aligned_outside_the_safe_box(self):
+        render_framed_page = self._frame_api()["render_framed_page"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._marked_source(root / "source.png", (360, 720))
+            target = render_framed_page(source, root / "editorial.png", "editorial-warm", 100, 100)
+            with Image.open(target).convert("RGB") as image:
+                page_pixels = self._color_pixels(image, (990, 120, 1080, 190), (183, 77, 54), tolerance=64)
+                self.assertTrue(page_pixels)
+                self.assertGreaterEqual(min(x for x, _ in page_pixels), 990)
+                self.assertGreater(max(x for x, _ in page_pixels), 1040)
+                self.assertLess(max(x for x, _ in page_pixels), 1080)
 
     def test_framed_rendering_rejects_empty_unknown_missing_and_bad_sources(self):
         api = self._frame_api()
@@ -132,8 +192,8 @@ class CardTemplateTests(unittest.TestCase):
                 render_framed_page(bad, root / "out.png", "classic-gray", 1, 1)
 
     @staticmethod
-    def _marked_source(path: Path, size: tuple[int, int]) -> Path:
-        image = Image.new("RGB", size, (35, 155, 210))
+    def _marked_source(path: Path, size: tuple[int, int], fill: tuple[int, int, int] = (35, 155, 210)) -> Path:
+        image = Image.new("RGB", size, fill)
         marker = max(8, min(size) // 8)
         draw = ImageDraw.Draw(image)
         width, height = size
@@ -151,7 +211,7 @@ class CardTemplateTests(unittest.TestCase):
             (x, y)
             for y in range(safe_box[1], safe_box[3])
             for x in range(safe_box[0], safe_box[2])
-            if pixels[x, y] != (250, 250, 248)
+            if pixels[x, y] != (255, 255, 255)
         ]
         xs, ys = zip(*candidates)
         return min(xs), min(ys), max(xs) + 1, max(ys) + 1
@@ -176,6 +236,39 @@ class CardTemplateTests(unittest.TestCase):
             if not (safe_box[0] <= x < safe_box[2] and safe_box[1] <= y < safe_box[3])
             for channel in pixels[x, y]
         )
+
+    @staticmethod
+    def _assert_region_outside_safe(region: tuple[int, int, int, int], safe_box: tuple[int, int, int, int]) -> None:
+        left, top, right, bottom = region
+        safe_left, safe_top, safe_right, safe_bottom = safe_box
+        intersects = left < safe_right and right > safe_left and top < safe_bottom and bottom > safe_top
+        if intersects:
+            raise AssertionError(f"decoration region intersects SAFE_BOX: {region}")
+
+    @staticmethod
+    def _color_pixels(
+        image: Image.Image,
+        region: tuple[int, int, int, int],
+        color: tuple[int, int, int],
+        tolerance: int = 0,
+    ) -> list[tuple[int, int]]:
+        left, top, right, bottom = region
+        return [
+            (x, y)
+            for y in range(top, bottom)
+            for x in range(left, right)
+            if all(abs(actual - expected) <= tolerance for actual, expected in zip(image.getpixel((x, y)), color))
+        ]
+
+    @classmethod
+    def _region_has_color(
+        cls,
+        image: Image.Image,
+        region: tuple[int, int, int, int],
+        color: tuple[int, int, int],
+        tolerance: int = 0,
+    ) -> bool:
+        return bool(cls._color_pixels(image, region, color, tolerance))
 
     def _frame_api(self) -> dict[str, object]:
         return self._frame_api_static()

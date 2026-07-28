@@ -11,7 +11,7 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 FONT_PATH = SKILL_DIR / "assets/cjk-font/NotoSansSC.ttf"
 WIDTH, HEIGHT = 1080, 1440
 SAFE_BOX = (90, 120, 990, 1320)
-SAFE_FILL = "#FAFAF8"
+SAFE_FILL = "#FFFFFF"
 
 
 @dataclass(frozen=True)
@@ -83,9 +83,10 @@ def _draw_frame(canvas: Image.Image, template_id: str, page_no: int, total_pages
         draw.rectangle((0, 0, WIDTH - 1, HEIGHT - 1), fill="#F6F0E8")
         draw.rectangle((42, 34, WIDTH - 43, 50), fill="#B74D36")
         draw.rectangle((42, 34, WIDTH - 43, HEIGHT - 43), outline="#DCCFC0", width=2)
-        font = load_font(24)
+        font = load_font(16)
         page_label = f"{page_no:02d}/{total_pages:02d}"
-        draw.text((1002, 130), page_label, font=font, fill="#B74D36", anchor="la")
+        label_width = draw.textbbox((0, 0), page_label, font=font)[2]
+        draw.text((WIDTH - 18 - label_width, 130), page_label, font=font, fill="#B74D36")
     elif spec.variant == "premium":
         draw.rectangle((0, 0, WIDTH - 1, HEIGHT - 1), fill="#172A3A")
         draw.ellipse((1002, -56, 1226, 168), outline="#D9AF67", width=3)
