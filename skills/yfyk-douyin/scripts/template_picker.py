@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import threading
 import time
 import webbrowser
@@ -13,19 +12,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from card_templates import TEMPLATES, render_cards
+from card_templates import TEMPLATES, render_framed_page
+from docx_page_renderer import PageRenderError, render_docx_pages
 from template_assignment import BALANCED_RANDOM
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 HTML_PATH = SKILL_DIR / "assets/template-picker/index.html"
-
-PREVIEW_BLOCKS = [
-    {"type": "paragraph", "style": "Heading 1", "text": "产业工人建设决定交付基本盘"},
-    {"type": "paragraph", "style": "Normal", "text": "家装质量最终落在一线工人身上。标准化培训，是稳定交付的基础。"},
-    {"type": "paragraph", "style": "Heading 2", "text": "实训基地让标准可训练、可考核"},
-    {"type": "paragraph", "style": "Normal", "text": "围绕关键工种建立训练、考核与验收路径。"},
-]
-
 
 def _atomic_json(path: Path, payload: dict[str, Any]):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,21 +26,38 @@ def _atomic_json(path: Path, payload: dict[str, Any]):
     os.replace(temp, path)
 
 
-def generate_previews(session_dir: Path) -> dict[str, Path]:
+def generate_previews(source_docx: Path, session_dir: Path) -> dict[str, Path]:
+    """Render the source DOCX once, then frame its real first page for every template."""
+    source_docx = Path(source_docx)
+    session_dir = Path(session_dir)
+    source_pages = render_docx_pages(source_docx, session_dir / "source-pages")
+    if not source_pages:
+        raise PageRenderError("source DOCX rendered no pages")
+
+    first_page = Path(source_pages[0])
+    if not first_page.is_file():
+        raise PageRenderError(f"first rendered source page does not exist: {first_page}")
+
     preview_dir = session_dir / "previews"
     preview_dir.mkdir(parents=True, exist_ok=True)
     outputs: dict[str, Path] = {}
     for template_id in sorted(TEMPLATES):
-        cards = render_cards(PREVIEW_BLOCKS, session_dir / "render" / template_id, template_id)
         target = preview_dir / f"{template_id}.png"
-        shutil.copy2(cards[0], target)
+        try:
+            render_framed_page(first_page, target, template_id, 1, len(source_pages))
+        except PageRenderError:
+            raise
+        except Exception as exc:
+            raise PageRenderError(f"failed to render preview for template {template_id}: {exc}") from exc
+        if not target.is_file():
+            raise PageRenderError(f"preview render did not produce an image: {target}")
         outputs[template_id] = target
     return outputs
 
 
-def create_picker_server(session_dir: Path, result_path: Path) -> ThreadingHTTPServer:
+def create_picker_server(source_docx: Path, session_dir: Path, result_path: Path) -> ThreadingHTTPServer:
     result_path.unlink(missing_ok=True)
-    generate_previews(session_dir)
+    generate_previews(source_docx, session_dir)
     allowed = set(TEMPLATES) | {BALANCED_RANDOM}
 
     class PickerHandler(BaseHTTPRequestHandler):
@@ -97,8 +106,14 @@ def create_picker_server(session_dir: Path, result_path: Path) -> ThreadingHTTPS
     return ThreadingHTTPServer(("127.0.0.1", 0), PickerHandler)
 
 
-def run_picker(work_dir: Path, result_path: Path, timeout_seconds: int, open_browser: bool = False) -> dict[str, Any]:
-    server = create_picker_server(work_dir, result_path)
+def run_picker(
+    source_docx: Path,
+    work_dir: Path,
+    result_path: Path,
+    timeout_seconds: int,
+    open_browser: bool = False,
+) -> dict[str, Any]:
+    server = create_picker_server(source_docx, work_dir, result_path)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}/"
@@ -120,6 +135,7 @@ def run_picker(work_dir: Path, result_path: Path, timeout_seconds: int, open_bro
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Show real previews and select a Douyin card template.")
+    parser.add_argument("--source", required=True, type=Path, help="Source DOCX used for the real-page previews.")
     parser.add_argument("--work-dir", required=True, type=Path)
     parser.add_argument("--result", required=True, type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
@@ -130,7 +146,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     try:
-        selection = run_picker(args.work_dir, args.result, args.timeout_seconds, args.open_browser)
+        selection = run_picker(args.source, args.work_dir, args.result, args.timeout_seconds, args.open_browser)
     except TimeoutError as exc:
         print(json.dumps({"status": "timeout", "error": str(exc)}, ensure_ascii=False))
         return 2

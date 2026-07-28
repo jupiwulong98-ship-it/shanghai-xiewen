@@ -7,19 +7,36 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from template_picker import create_picker_server, generate_previews, run_picker  # noqa: E402
+from card_templates import render_framed_page  # noqa: E402
+from docx_page_renderer import PageRenderError  # noqa: E402
+from template_picker import create_picker_server, generate_previews, main, run_picker  # noqa: E402
 
 
 class TemplatePickerTests(unittest.TestCase):
+    def _source(self, root: Path) -> Path:
+        source = root / "source.docx"
+        source.touch()
+        return source
+
+    def _page(self, root: Path, name: str = "page-001.png") -> Path:
+        page = root / name
+        Image.new("RGB", (640, 960), "#4d7ea8").save(page)
+        return page
+
     def test_picker_does_not_open_browser_by_default(self):
         default = inspect.signature(run_picker).parameters["open_browser"].default
         self.assertIs(default, False)
+
+    def test_picker_requires_source_docx(self):
+        self.assertIn("source_docx", inspect.signature(create_picker_server).parameters)
+        self.assertIn("source_docx", inspect.signature(run_picker).parameters)
 
     def test_skill_requires_chat_native_selection_before_web_fallback(self):
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
@@ -33,30 +50,87 @@ class TemplatePickerTests(unittest.TestCase):
     def test_new_picker_session_clears_stale_selection(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            source = self._source(root)
             result = root / "selection.json"
             result.write_text('{"choice":"classic-gray"}', encoding="utf-8")
-            server = create_picker_server(root, result)
-            try:
-                self.assertFalse(result.exists())
-            finally:
-                server.server_close()
+            with patch("template_picker.generate_previews", return_value={}):
+                server = create_picker_server(source, root, result)
+                try:
+                    self.assertFalse(result.exists())
+                finally:
+                    server.server_close()
 
-    def test_preview_generation_uses_all_production_templates(self):
+    def test_preview_generation_frames_the_same_real_first_page_for_all_templates(self):
         with tempfile.TemporaryDirectory() as temp:
-            previews = generate_previews(Path(temp))
+            root = Path(temp)
+            source = self._source(root)
+            first_page = self._page(root)
+            second_page = self._page(root, "page-002.png")
+            with (
+                patch(
+                    "template_picker.render_docx_pages",
+                    return_value=[first_page, second_page],
+                ) as render_pages,
+                patch(
+                    "template_picker.render_framed_page",
+                    wraps=render_framed_page,
+                ) as frame_page,
+            ):
+                previews = generate_previews(source, root / "session")
+
+            render_pages.assert_called_once_with(source, root / "session" / "source-pages")
             self.assertEqual(
                 set(previews),
                 {"classic-gray", "editorial-warm", "premium-dark", "minimal-white"},
             )
+            self.assertEqual(frame_page.call_count, 4)
+            for call in frame_page.call_args_list:
+                self.assertEqual(call.args[0], first_page)
+                self.assertEqual(call.args[3:], (1, 2))
             for path in previews.values():
                 with Image.open(path) as image:
                     self.assertEqual(image.size, (1080, 1440))
 
+    def test_preview_generation_rejects_empty_or_missing_pages(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._source(root)
+            with patch("template_picker.render_docx_pages", return_value=[]):
+                with self.assertRaisesRegex(PageRenderError, "no pages"):
+                    generate_previews(source, root / "empty")
+            with patch("template_picker.render_docx_pages", return_value=[root / "missing.png"]):
+                with self.assertRaisesRegex(PageRenderError, "does not exist"):
+                    generate_previews(source, root / "missing")
+
+    def test_preview_generation_propagates_page_render_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._source(root)
+            expected = PageRenderError("conversion failed")
+            with patch("template_picker.render_docx_pages", side_effect=expected):
+                with self.assertRaises(PageRenderError) as caught:
+                    generate_previews(source, root / "failed")
+            self.assertIs(caught.exception, expected)
+
+    def test_preview_generation_wraps_frame_failures_as_page_render_errors(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._source(root)
+            first_page = self._page(root)
+            with (
+                patch("template_picker.render_docx_pages", return_value=[first_page]),
+                patch("template_picker.render_framed_page", side_effect=OSError("disk failure")),
+            ):
+                with self.assertRaisesRegex(PageRenderError, "failed to render preview"):
+                    generate_previews(source, root / "failed-frame")
+
     def test_server_serves_picker_and_accepts_valid_choice(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            source = self._source(root)
             result = root / "selection.json"
-            server = create_picker_server(root, result)
+            with patch("template_picker.generate_previews", return_value={}):
+                server = create_picker_server(source, root, result)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
@@ -87,8 +161,10 @@ class TemplatePickerTests(unittest.TestCase):
     def test_server_rejects_unknown_choice_without_result(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            source = self._source(root)
             result = root / "selection.json"
-            server = create_picker_server(root, result)
+            with patch("template_picker.generate_previews", return_value={}):
+                server = create_picker_server(source, root, result)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
@@ -109,6 +185,39 @@ class TemplatePickerTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+
+    def test_cli_requires_source_and_passes_it_to_picker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._source(root)
+            result = root / "selection.json"
+            with (
+                patch("template_picker.run_picker", return_value={"choice": "minimal-white"}) as picker,
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "template_picker.py",
+                        "--source",
+                        str(source),
+                        "--work-dir",
+                        str(root / "session"),
+                        "--result",
+                        str(result),
+                    ],
+                ),
+            ):
+                self.assertEqual(main(), 0)
+            picker.assert_called_once_with(source, root / "session", result, 1800, False)
+
+            with patch.object(
+                sys,
+                "argv",
+                ["template_picker.py", "--work-dir", str(root / "session"), "--result", str(result)],
+            ):
+                with self.assertRaises(SystemExit) as missing_source:
+                    main()
+            self.assertEqual(missing_source.exception.code, 2)
 
 
 if __name__ == "__main__":
